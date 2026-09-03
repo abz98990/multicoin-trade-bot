@@ -103,13 +103,22 @@ class Database:
         target = entry_price * (1 + self.config.TAKE_PROFIT / 100) if self.config.TAKE_PROFIT else None
         return stop, target
 
-    def set_current_coin(self, coin: Union[Coin, str], entry_price: float = None):
+    def set_current_coin(
+        self,
+        coin: Union[Coin, str],
+        entry_price: float = None,
+        stop_loss: float = None,
+        take_profit: float = None,
+    ):
         coin = self.get_coin(coin)
         # Read the symbol now: merging rebinds `coin` to an instance that is
         # detached and expired once the session closes, so touching it after
         # the block raises DetachedInstanceError.
         symbol = coin.symbol if isinstance(coin, Coin) else str(coin)
-        stop_loss, take_profit = self.risk_levels(entry_price)
+        # A manual entry can name its own levels; otherwise they come from the
+        # configured percentages.
+        if stop_loss is None and take_profit is None:
+            stop_loss, take_profit = self.risk_levels(entry_price)
 
         session: Session
         with self.db_session() as session:
@@ -340,6 +349,85 @@ class Database:
                 session.add(UnknownTicker(symbol))
             else:
                 row.datetime = datetime.utcnow()
+
+    def coin_round_trips(self):
+        """
+        Pair each completed buy of a coin with the sell that closed it.
+
+        Everything needed is already in trade_history - this walks it in order
+        per coin rather than storing a second copy that could drift out of
+        step with the trades it describes. An unmatched buy is an open
+        position and is returned with no exit.
+        """
+        session: Session
+        with self.db_session() as session:
+            trades = (
+                session.query(Trade)
+                .filter(Trade.state == TradeState.COMPLETE)
+                .order_by(Trade.datetime.asc())
+                .all()
+            )
+            rows = [t.info() for t in trades]
+
+        open_leg = {}
+        trips = []
+        for trade in rows:
+            symbol = trade["alt_coin"]["symbol"]
+            if not trade["selling"]:
+                # A second buy without an intervening sell just adds to the
+                # position; keep the first as the entry.
+                open_leg.setdefault(symbol, trade)
+                continue
+
+            entry = open_leg.pop(symbol, None)
+            trips.append(self._round_trip(symbol, entry, trade))
+
+        for symbol, entry in open_leg.items():
+            trips.append(self._round_trip(symbol, entry, None))
+
+        trips.sort(key=lambda t: t["opened"] or "", reverse=True)
+        return trips
+
+    @staticmethod
+    def _round_trip(symbol, entry, exit_trade):
+        def price(trade):
+            if trade is None:
+                return None
+            if trade.get("fill_price"):
+                return trade["fill_price"]
+            amount = trade.get("alt_trade_amount") or 0
+            spent = trade.get("crypto_trade_amount") or 0
+            return (spent / amount) if amount else None
+
+        entry_price, exit_price = price(entry), price(exit_trade)
+        units_in = (entry or {}).get("alt_trade_amount")
+        units_out = (exit_trade or {}).get("alt_trade_amount")
+
+        gain = None
+        if entry_price and exit_price:
+            gain = (exit_price / entry_price - 1) * 100
+
+        held = None
+        if entry and exit_trade:
+            held = (
+                datetime.fromisoformat(exit_trade["datetime"])
+                - datetime.fromisoformat(entry["datetime"])
+            ).total_seconds()
+
+        return {
+            "coin": symbol,
+            "opened": (entry or {}).get("datetime"),
+            "closed": (exit_trade or {}).get("datetime"),
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "units_in": units_in,
+            "units_out": units_out,
+            "spent": (entry or {}).get("crypto_trade_amount"),
+            "received": (exit_trade or {}).get("crypto_trade_amount"),
+            "gain_percent": gain,
+            "held_seconds": held,
+            "open": exit_trade is None,
+        }
 
     def start_trade_log(self, from_coin: Coin, to_coin: Coin, selling: bool):
         return TradeLog(self, from_coin, to_coin, selling)

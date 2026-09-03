@@ -1,3 +1,4 @@
+import math
 import re
 import threading
 from datetime import datetime, timedelta
@@ -16,7 +17,17 @@ from sqlalchemy.orm import Session
 from .config import Config
 from .database import Database
 from .logger import Logger
-from .models import Coin, CoinValue, CurrentCoin, EquitySnapshot, Pair, RatchetEntry, ScoutHistory, Trade
+from .models import (
+    Coin,
+    CoinValue,
+    CurrentCoin,
+    EquitySnapshot,
+    Pair,
+    RatchetEntry,
+    ScoutHistory,
+    Trade,
+    TradeState,
+)
 
 app = Flask(__name__)
 # Re-read dashboard.html when it changes on disk. Jinja otherwise caches the
@@ -147,6 +158,247 @@ def ratchet():
         query = session.query(RatchetEntry).order_by(RatchetEntry.datetime.desc())
         query = filter_period(query, RatchetEntry)
         return jsonify([entry.info() for entry in query.all()])
+
+
+def _symbol_filter(symbol: str, filter_type: str):
+    info = binance_client().get_symbol_info(symbol)
+    if not info:
+        return None
+    for entry in info["filters"]:
+        if entry["filterType"] == filter_type:
+            return entry
+    return None
+
+
+def _step_decimals(step: str) -> int:
+    """Decimal places allowed by a stepSize like '0.10000000'."""
+    step = step.rstrip("0")
+    if "." not in step:
+        return 0
+    return len(step.split(".")[1])
+
+
+@app.route("/api/round_trips")
+def round_trips():
+    """Every entry paired with the exit that closed it, newest first."""
+    return jsonify(db.coin_round_trips())
+
+
+@app.route("/api/holdings/buy", methods=["POST"])
+def buy_holding():
+    """
+    Buy a coin manually for a given amount of bridge currency, with its own
+    stop-loss and take-profit.
+
+    This is the only way to attach risk levels to a position on demand: levels
+    are fixed when a position opens, and the bot only opens one when its own
+    signal fires.
+    """
+    if is_cross_origin():
+        return jsonify({"error": "Holdings can only be bought from the dashboard itself."}), 403
+
+    payload = request.get_json(silent=True) or {}
+    symbol = str(payload.get("symbol", "")).upper().strip()
+    bridge = config.BRIDGE.symbol
+
+    if symbol not in config.SUPPORTED_COIN_LIST:
+        return jsonify(
+            {"error": f"{symbol or '(none)'} is not in supported_coin_list, so the bot could not manage it."}
+        ), 400
+
+    try:
+        amount = float(payload.get("amount"))
+    except (TypeError, ValueError):
+        return jsonify({"error": f"Enter how much {bridge} to spend."}), 400
+    if amount <= 0:
+        return jsonify({"error": "Amount must be greater than zero."}), 400
+
+    def optional_percent(key):
+        raw = payload.get(key)
+        if raw in (None, ""):
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return "bad"
+        return value if value > 0 else None
+
+    stop_pct, target_pct = optional_percent("stop_loss"), optional_percent("take_profit")
+    if "bad" in (stop_pct, target_pct):
+        return jsonify({"error": "Stop-loss and take-profit must be numbers."}), 400
+
+    pair = symbol + bridge
+    client = binance_client()
+
+    try:
+        free = float(client.get_asset_balance(asset=bridge)["free"])
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"error": "Could not reach Binance: {}".format(exc)}), 502
+
+    if amount > free:
+        return jsonify({"error": f"Only {free:,.2f} {bridge} available."}), 400
+
+    lot = _symbol_filter(pair, "LOT_SIZE")
+    if lot is None:
+        return jsonify({"error": f"{pair} is not a tradable pair."}), 400
+
+    try:
+        price = float(client.get_symbol_ticker(symbol=pair)["price"])
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"error": "Could not price {}: {}".format(pair, exc)}), 502
+
+    decimals = _step_decimals(lot["stepSize"])
+    factor = 10 ** decimals
+    quantity = math.floor(amount / price * factor) / factor
+    quantity = min(quantity, float(lot["maxQty"]))
+    quantity = math.floor(quantity * factor) / factor
+
+    if quantity < float(lot["minQty"]):
+        return jsonify(
+            {"error": f"{amount:g} {bridge} buys less than the minimum order size of {lot['minQty']} {symbol}."}
+        ), 400
+
+    notional = _symbol_filter(pair, "NOTIONAL")
+    if notional and quantity * price < float(notional["minNotional"]):
+        return jsonify(
+            {"error": f"That is below the {notional['minNotional']} {bridge} minimum order value."}
+        ), 400
+
+    quantity_s = "{:0.0{}f}".format(quantity, decimals)
+    logger.warning(f"Manual buy requested from the dashboard: {quantity_s} {symbol} for ~{amount:g} {bridge}")
+
+    trade_log = db.start_trade_log(db.get_coin(symbol), db.get_coin(bridge), False)
+    try:
+        order = client.order_market_buy(symbol=pair, quantity=quantity_s)
+    except BinanceAPIException as exc:
+        logger.warning(f"Manual buy of {symbol} rejected: {exc.message}")
+        return jsonify({"error": exc.message}), 400
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"error": "Could not reach Binance: {}".format(exc)}), 502
+
+    filled = float(order["executedQty"])
+    spent = float(order["cummulativeQuoteQty"])
+    fill_price = (spent / filled) if filled else price
+
+    trade_log.set_ordered(0.0, free, quantity, int(order["orderId"]), price)
+    trade_log.set_complete(spent, fill_price)
+
+    stop = fill_price * (1 - stop_pct / 100) if stop_pct else None
+    target = fill_price * (1 + target_pct / 100) if target_pct else None
+    db.set_current_coin(symbol, fill_price, stop, target)
+
+    logger.info(
+        f"Manual buy filled: {filled:g} {symbol} for {spent:g} {bridge} at {fill_price:.8g}"
+        + (f", stop {stop:.8g}" if stop else "")
+        + (f", target {target:.8g}" if target else "")
+    )
+    return jsonify(
+        {
+            "symbol": symbol,
+            "bought": filled,
+            "spent": spent,
+            "price": fill_price,
+            "stop_loss": stop,
+            "take_profit": target,
+            "status": order["status"],
+        }
+    )
+
+
+@app.route("/api/holdings/<symbol>/sell", methods=["POST"])
+def sell_holding(symbol: str):
+    """
+    Sell the whole free balance of one coin into the bridge, at market.
+
+    Deliberately self-contained rather than reusing BinanceAPIManager.sell_alt:
+    that path needs the websocket stream manager and the REST order poller,
+    which belong to the bot process. A market order fills on placement, so
+    there is nothing here to poll.
+    """
+    if is_cross_origin():
+        return jsonify({"error": "Holdings can only be sold from the dashboard itself."}), 403
+
+    symbol = symbol.upper()
+    bridge = config.BRIDGE.symbol
+    if symbol == bridge:
+        return jsonify({"error": f"{bridge} is the bridge currency; there is nothing to sell it into."}), 400
+
+    pair = symbol + bridge
+    client = binance_client()
+
+    try:
+        holding = client.get_asset_balance(asset=symbol)
+    except BinanceAPIException as exc:
+        return jsonify({"error": exc.message}), 400
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"error": "Could not reach Binance: {}".format(exc)}), 502
+
+    # Binance answers with null rather than an error for an unknown asset.
+    if not holding:
+        return jsonify({"error": f"{symbol} is not an asset on this account."}), 400
+
+    balance = float(holding["free"])
+
+    if not balance:
+        return jsonify({"error": f"No free {symbol} to sell."}), 400
+
+    lot = _symbol_filter(pair, "LOT_SIZE")
+    if lot is None:
+        return jsonify({"error": f"{pair} is not a tradable pair."}), 400
+
+    decimals = _step_decimals(lot["stepSize"])
+    factor = 10 ** decimals
+    quantity = math.floor(balance * factor) / factor
+    quantity = min(quantity, float(lot["maxQty"]))
+    quantity = math.floor(quantity * factor) / factor
+
+    if quantity < float(lot["minQty"]):
+        return jsonify(
+            {"error": f"{balance:g} {symbol} is below the minimum order size of {lot['minQty']}."}
+        ), 400
+
+    notional = _symbol_filter(pair, "NOTIONAL")
+    price = None
+    try:
+        price = float(client.get_symbol_ticker(symbol=pair)["price"])
+    except Exception:  # pylint: disable=broad-except
+        pass
+    if notional and price and quantity * price < float(notional["minNotional"]):
+        return jsonify(
+            {"error": f"That would be worth less than the {notional['minNotional']} {bridge} minimum."}
+        ), 400
+
+    quantity_s = "{:0.0{}f}".format(quantity, decimals)
+    logger.warning(f"Manual sell requested from the dashboard: {quantity_s} {symbol} -> {bridge}")
+
+    trade_log = db.start_trade_log(db.get_coin(symbol), db.get_coin(bridge), True)
+    try:
+        order = client.order_market_sell(symbol=pair, quantity=quantity_s)
+    except BinanceAPIException as exc:
+        db.finish_trade(None, TradeState.CANCELED)
+        logger.warning(f"Manual sell of {symbol} rejected: {exc.message}")
+        return jsonify({"error": exc.message}), 400
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"error": "Could not reach Binance: {}".format(exc)}), 502
+
+    filled = float(order["executedQty"])
+    received = float(order["cummulativeQuoteQty"])
+    fill_price = (received / filled) if filled else None
+
+    trade_log.set_ordered(balance, None, quantity, int(order["orderId"]), price)
+    trade_log.set_complete(received, fill_price)
+
+    logger.info(f"Manual sell filled: {filled:g} {symbol} for {received:g} {bridge}")
+    return jsonify(
+        {
+            "symbol": symbol,
+            "sold": filled,
+            "received": received,
+            "bridge": bridge,
+            "price": fill_price,
+            "status": order["status"],
+        }
+    )
 
 
 @app.route("/api/open_orders")

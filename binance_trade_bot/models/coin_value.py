@@ -71,6 +71,11 @@ class CoinValue(Base):
     def info(self):
         return {
             "balance": self.balance,
+            # The unit price, not just balance x price. Recorded since the
+            # beginning but never surfaced, so a per-coin price chart needs no
+            # new collection.
+            "usd_price": self.usd_price,
+            "btc_price": self.btc_price,
             "usd_value": self.usd_value,
             "btc_value": self.btc_value,
             "datetime": self.datetime.isoformat(),

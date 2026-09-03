@@ -108,6 +108,19 @@
   .posgrid .lab{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em}
   .posgrid .val{font:600 15px/1.3 var(--mono);margin-top:3px}
 
+  .form{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
+  .form label{display:flex;flex-direction:column;gap:5px;font-size:10px;color:var(--dim);
+    text-transform:uppercase;letter-spacing:.06em;font-family:var(--mono)}
+  .form input,.form select{font:600 14px/1 var(--mono);color:var(--fg);background:var(--panel-2);
+    border:1px solid var(--line);border-radius:6px;padding:8px 10px;min-width:96px}
+  .form input:focus,.form select:focus{outline:2px solid var(--link);outline-offset:1px}
+  .form .btn{padding:10px 16px;font-size:12px}
+  .msg{margin-top:12px;font-size:13px}
+  .msg.err{color:var(--down)} .msg.ok{color:var(--up)}
+  .picker{font:600 10px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;
+    color:var(--fg);background:var(--panel-2);border:1px solid var(--line);
+    border-radius:6px;padding:5px 8px}
+
   .seg{display:inline-flex;gap:2px;background:var(--panel-2);border:1px solid var(--line);
     border-radius:6px;padding:2px}
   .seg button{font:600 10px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;
@@ -171,6 +184,22 @@
     <div class="card wide">
       <h2>Position <span class="note" id="posNote">&nbsp;</span></h2>
       <div class="body"><div id="posBody"></div></div>
+    </div>
+
+    <div class="card wide">
+      <h2>Manual buy
+        <span class="note">opens a position with levels of your own, alongside the bot's own trading</span>
+      </h2>
+      <div class="body">
+        <div class="form">
+          <label>Coin<select id="buyCoin"></select></label>
+          <label>Spend<input id="buyAmount" type="number" min="0" step="any" placeholder="0.00"></label>
+          <label>Stop-loss %<input id="buyStop" type="number" min="0" step="any" placeholder="none"></label>
+          <label>Take-profit %<input id="buyTarget" type="number" min="0" step="any" placeholder="none"></label>
+          <button class="btn" type="button" id="buyBtn">Buy</button>
+        </div>
+        <div class="msg" id="buyMsg"></div>
+      </div>
     </div>
 
     <div class="card wide">
@@ -241,6 +270,33 @@
     </div>
 
     <div class="card">
+      <h2>Price history
+        <span class="h2right">
+          <span class="note" id="phNote">&nbsp;</span>
+          <select class="picker" id="phCoin"></select>
+        </span>
+      </h2>
+      <div class="body"><div id="phChart"></div></div>
+    </div>
+
+    <div class="card wide">
+      <h2>Entries and exits <span class="note">every position paired with the trade that closed it</span></h2>
+      <div class="body flush"><div class="scroll">
+        <table>
+          <thead><tr>
+            <th>Coin</th><th class="num">Entry</th><th class="num">Exit</th>
+            <th class="num">Result</th><th class="num">Held</th>
+            <th class="num">In</th><th class="num">Out</th><th>Opened</th>
+          </tr></thead>
+          <tbody id="rtripBody"></tbody>
+        </table>
+        <div class="empty hidden" id="rtripEmpty">
+          No completed positions yet.
+        </div>
+      </div></div>
+    </div>
+
+    <div class="card">
       <h2>Ratchet <span class="note">units held each time a coin is re-entered</span></h2>
       <div class="body flush"><div class="scroll">
         <table>
@@ -257,12 +313,12 @@
     </div>
 
     <div class="card">
-      <h2>Holdings</h2>
+      <h2>Holdings <span class="note">sell any holding into the bridge at market</span></h2>
       <div class="body flush"><div class="scroll">
         <table>
           <thead><tr>
             <th>Coin</th><th class="num">Balance</th>
-            <th class="num">USD</th><th style="width:28%">Share</th>
+            <th class="num">USD</th><th style="width:22%">Share</th><th></th>
           </tr></thead>
           <tbody id="hodlBody"></tbody>
         </table>
@@ -295,6 +351,10 @@ var POLL_MS = 5000;
 var FEE_PER_LEG = 0.001;   // 0.1% taker; the API does not expose the live fee
 var timer = null, paused = false, cfg = null;
 var orderArmed = false;   // a Cancel button is waiting for confirmation
+var sellArmed = false;    // a Sell button is waiting for confirmation
+var buyArmed = false;     // the Buy button is waiting for confirmation
+var priceCoin = null;     // which coin the price chart is showing
+var coinsLoaded = false;
 
 // Which slice of history the performance chart shows. Remembered per browser,
 // wrapped because storage can be unavailable or throw in a private window.
@@ -578,14 +638,22 @@ function renderHoldings(valueHistory, bridge){
   var total = rows.reduce(function(a, r){ return a + r.usd; }, 0);
   rows.sort(function(a, b){ return b.usd - a.usd; });
 
+  // Don't repaint while someone is mid-confirmation on a Sell button.
+  if(sellArmed) return;
+
   empty.classList.toggle("hidden", rows.length > 0);
   body.innerHTML = rows.map(function(r){
     var share = total > 0 ? (r.usd / total * 100) : 0;
+    // The bridge is what everything sells into, so it has no Sell action.
+    var action = (r.sym === bridge)
+      ? '<span class="dimtxt">bridge</span>'
+      : '<button class="btn" type="button" data-sell="' + esc(r.sym) + '">Sell</button>';
     return "<tr>"
       + '<td class="coin">' + esc(r.sym) + "</td>"
       + '<td class="num">' + sig(r.bal) + "</td>"
       + '<td class="num">' + num(r.usd, 2) + "</td>"
       + '<td><div class="bar"><i style="width:' + share.toFixed(1) + '%"></i></div></td>'
+      + '<td style="text-align:right">' + action + "</td>"
       + "</tr>";
   }).join("");
 }
@@ -821,6 +889,94 @@ function renderPosition(coinHistory, held, price){
     + "</div>";
 }
 
+function renderRoundTrips(trips){
+  var body = el("rtripBody"), empty = el("rtripEmpty");
+  trips = trips || [];
+  empty.classList.toggle("hidden", trips.length > 0);
+  body.innerHTML = trips.map(function(t){
+    var gain = t.gain_percent;
+    var held = t.held_seconds == null ? "—" : dur(t.held_seconds);
+    var state = t.open
+      ? '<span class="pill buy">OPEN</span>'
+      : (gain == null ? '<span class="dimtxt">—</span>'
+         : '<span class="' + (gain >= 0 ? "up" : "down") + '">' + pct(gain) + "</span>");
+    return "<tr>"
+      + '<td class="coin">' + esc(t.coin) + "</td>"
+      + '<td class="num">' + (t.entry_price ? sig(t.entry_price) : '<span class="dimtxt">not recorded</span>') + "</td>"
+      + '<td class="num">' + (t.exit_price ? sig(t.exit_price) : "—") + "</td>"
+      + '<td class="num">' + state + "</td>"
+      + '<td class="num dimtxt">' + held + "</td>"
+      + '<td class="num dimtxt">' + (t.spent ? num(t.spent, 2) : "—") + "</td>"
+      + '<td class="num dimtxt">' + (t.received ? num(t.received, 2) : "—") + "</td>"
+      + '<td class="dimtxt">' + (t.opened ? clock(parseUtc(t.opened)) + " " + ago(parseUtc(t.opened)) : "—") + "</td>"
+      + "</tr>";
+  }).join("");
+}
+
+function renderPriceHistory(rows){
+  var host = el("phChart"), note = el("phNote");
+  var pts = (rows || []).map(function(r){
+    // CoinValue timestamps in local time, unlike the UTC tables.
+    return {t: parseLocal(r.datetime), v: r.usd_price};
+  }).filter(function(p){ return p.t && p.v; });
+
+  if(pts.length < 2){
+    host.innerHTML = '<div class="empty">Not enough price points for '
+      + esc(priceCoin || "this coin") + " yet.</div>";
+    note.textContent = "";
+    return;
+  }
+
+  var W = 560, H = 190, PL = 62, PR = 12, PT = 12, PB = 24;
+  var lo = Math.min.apply(null, pts.map(function(p){ return p.v; }));
+  var hi = Math.max.apply(null, pts.map(function(p){ return p.v; }));
+  if(hi === lo){ hi = lo * 1.001 || 1; lo = lo * 0.999; }
+  var pad = (hi - lo) * 0.12; lo -= pad; hi += pad;
+
+  var t0 = pts[0].t.getTime();
+  var tEnd = Math.max(pts[pts.length - 1].t.getTime(), Date.now());
+  var span = Math.max(1, tEnd - t0);
+  var multiDay = pts[0].t.toDateString() !== new Date(tEnd).toDateString();
+
+  var deltas = [];
+  for(var g = 1; g < pts.length; g++) deltas.push(pts[g].t - pts[g - 1].t);
+  var sorted = deltas.slice().sort(function(a, b){ return a - b; });
+  var median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  var gapLimit = Math.max(median * 4, 5 * 60000);
+
+  function X(p){ return PL + (p.t.getTime() - t0) / span * (W - PL - PR); }
+  function Y(v){ return PT + (1 - (v - lo) / (hi - lo)) * (H - PT - PB); }
+
+  var grid = "";
+  for(var i = 0; i <= 3; i++){
+    var y = PT + i / 3 * (H - PT - PB), val = hi - i / 3 * (hi - lo);
+    grid += '<line class="gl" x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR)
+          + '" y2="' + y.toFixed(1) + '"/>'
+          + '<text class="lbl" x="' + (PL - 7) + '" y="' + (y + 3).toFixed(1)
+          + '" text-anchor="end">' + sig(val) + "</text>";
+  }
+
+  var d = "", started = false;
+  pts.forEach(function(p, i){
+    var afterGap = i > 0 && (p.t - pts[i - 1].t) > gapLimit;
+    d += ((started && !afterGap) ? "L" : "M") + X(p).toFixed(1) + " " + Y(p.v).toFixed(1) + " ";
+    started = true;
+  });
+
+  var rising = pts[pts.length - 1].v >= pts[0].v;
+  var stroke = rising ? "var(--up)" : "var(--down)";
+  host.innerHTML = '<svg viewBox="0 0 ' + W + " " + H + '" width="100%" '
+    + 'preserveAspectRatio="xMidYMid meet" role="img" aria-label="Price history">'
+    + grid + '<path d="' + d.trim() + '" fill="none" stroke="' + stroke
+    + '" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>'
+    + '<text class="lbl" x="' + PL + '" y="' + (H - 7) + '">' + axisStamp(pts[0].t, multiDay) + "</text>"
+    + '<text class="lbl" x="' + (W - PR) + '" y="' + (H - 7) + '" text-anchor="end">'
+    + axisStamp(new Date(tEnd), multiDay) + "</text></svg>";
+
+  var change = (pts[pts.length - 1].v / pts[0].v - 1) * 100;
+  note.textContent = pts.length + " points \u00b7 " + pct(change);
+}
+
 function renderRatchet(entries){
   var body = el("rtBody"), empty = el("rtEmpty");
   entries = entries || [];
@@ -900,11 +1056,13 @@ function refresh(){
     getJSON("/api/open_orders").catch(function(e){ return {error: String(e.message || e)}; }),
     getJSON("/api/performance" + (perfPeriod === "all" ? "" : "?period=" + perfPeriod))
       .catch(function(){ return {series: []}; }),
-    getJSON("/api/ratchet").catch(function(){ return []; })
+    getJSON("/api/ratchet").catch(function(){ return []; }),
+    getJSON("/api/coins").catch(function(){ return []; }),
+    getJSON("/api/round_trips").catch(function(){ return []; })
   ]).then(function(res){
     var current = res[0], trades = res[1], scouts = res[2],
         values  = res[3], coinHistory = res[4], orders = res[5],
-        perf    = res[6], ratchet = res[7];
+        perf    = res[6], ratchet = res[7], coins = res[8], trips = res[9];
     var series  = buildSeries(values || {}, cfg ? cfg.BRIDGE_SYMBOL : null);
 
     el("err").classList.add("hidden");
@@ -922,6 +1080,8 @@ function refresh(){
     renderTrades(trades || []);
     renderPerformance(perf);
     renderRatchet(ratchet);
+    renderRoundTrips(trips);
+    fillCoinPickers(coins);
 
     el("lastUpd").textContent = "updated " + clock(new Date());
   }).catch(function(e){
@@ -994,6 +1154,141 @@ el("pvPeriod").addEventListener("click", function(ev){
   refresh();
 });
 markPeriod();
+
+function disarmSell(btn){
+  clearTimeout(btn._armTimer);
+  btn.classList.remove("armed");
+  btn.textContent = "Sell";
+  btn.disabled = false;
+  sellArmed = false;
+}
+
+el("hodlBody").addEventListener("click", function(ev){
+  var btn = ev.target.closest("button[data-sell]");
+  if(!btn) return;
+
+  var symbol = btn.getAttribute("data-sell");
+
+  if(!btn.classList.contains("armed")){
+    // Selling is irreversible and immediate, so it takes two clicks.
+    btn.classList.add("armed");
+    btn.textContent = "Sell all?";
+    sellArmed = true;
+    btn._armTimer = setTimeout(function(){ disarmSell(btn); }, 5000);
+    return;
+  }
+
+  clearTimeout(btn._armTimer);
+  btn.disabled = true;
+  btn.textContent = "Selling";
+
+  fetch("/api/holdings/" + encodeURIComponent(symbol) + "/sell", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"}
+  }).then(function(r){
+    return r.json().then(function(j){ return {ok: r.ok, data: j}; });
+  }).then(function(res){
+    if(!res.ok) throw new Error(res.data.error || "the request was refused");
+    sellArmed = false;
+    return refresh();
+  }).catch(function(e){
+    fail("Couldn't sell " + symbol + ": " + e.message);
+    disarmSell(btn);
+  });
+});
+
+function fillCoinPickers(coins){
+  if(coinsLoaded || !coins || !coins.length) return;
+  var enabled = coins.filter(function(c){ return c.enabled; })
+                     .map(function(c){ return c.symbol; }).sort();
+  if(!enabled.length) return;
+
+  var options = enabled.map(function(sym){
+    return '<option value="' + esc(sym) + '">' + esc(sym) + "</option>";
+  }).join("");
+  el("buyCoin").innerHTML = options;
+  el("phCoin").innerHTML = options;
+
+  var current = coins.filter(function(c){ return c.is_current; })[0];
+  priceCoin = (current && current.symbol) || enabled[0];
+  el("phCoin").value = priceCoin;
+  coinsLoaded = true;
+  loadPriceHistory();
+}
+
+function loadPriceHistory(){
+  if(!priceCoin) return;
+  getJSON("/api/value_history/" + encodeURIComponent(priceCoin))
+    .then(renderPriceHistory)
+    .catch(function(){ renderPriceHistory([]); });
+}
+
+el("phCoin").addEventListener("change", function(){
+  priceCoin = this.value;
+  loadPriceHistory();
+});
+
+function resetBuy(){
+  var b = el("buyBtn");
+  clearTimeout(b._armTimer);
+  b.classList.remove("armed");
+  b.textContent = "Buy";
+  b.disabled = false;
+  buyArmed = false;
+}
+
+el("buyBtn").addEventListener("click", function(){
+  var btn = this, msg = el("buyMsg");
+  var body = {
+    symbol: el("buyCoin").value,
+    amount: el("buyAmount").value,
+    stop_loss: el("buyStop").value,
+    take_profit: el("buyTarget").value
+  };
+
+  if(!body.amount || Number(body.amount) <= 0){
+    msg.className = "msg err";
+    msg.textContent = "Enter how much to spend.";
+    return;
+  }
+
+  if(!btn.classList.contains("armed")){
+    // Buying spends real balance, so it takes two clicks like selling.
+    btn.classList.add("armed");
+    btn.textContent = "Confirm buy";
+    buyArmed = true;
+    msg.className = "msg";
+    msg.textContent = "Click again to buy " + body.amount + " worth of " + body.symbol + ".";
+    btn._armTimer = setTimeout(resetBuy, 5000);
+    return;
+  }
+
+  clearTimeout(btn._armTimer);
+  btn.disabled = true;
+  btn.textContent = "Buying";
+
+  fetch("/api/holdings/buy", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)
+  }).then(function(r){
+    return r.json().then(function(j){ return {ok: r.ok, data: j}; });
+  }).then(function(res){
+    if(!res.ok) throw new Error(res.data.error || "the request was refused");
+    var d = res.data;
+    msg.className = "msg ok";
+    msg.textContent = "Bought " + sig(d.bought) + " " + d.symbol + " at " + sig(d.price)
+      + (d.stop_loss ? ", stop " + sig(d.stop_loss) : "")
+      + (d.take_profit ? ", target " + sig(d.take_profit) : "") + ".";
+    el("buyAmount").value = "";
+    resetBuy();
+    return refresh();
+  }).catch(function(e){
+    msg.className = "msg err";
+    msg.textContent = e.message;
+    resetBuy();
+  });
+});
 
 el("refreshBtn").addEventListener("click", refresh);
 el("pauseBtn").addEventListener("click", function(){
