@@ -1,9 +1,13 @@
 import re
+import threading
 from datetime import datetime, timedelta
 from itertools import groupby
 from typing import List, Tuple
+from urllib.parse import urlparse
 
-from flask import Flask, jsonify, request
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
+from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from sqlalchemy import func
@@ -12,9 +16,14 @@ from sqlalchemy.orm import Session
 from .config import Config
 from .database import Database
 from .logger import Logger
-from .models import Coin, CoinValue, CurrentCoin, Pair, ScoutHistory, Trade
+from .models import Coin, CoinValue, CurrentCoin, EquitySnapshot, Pair, RatchetEntry, ScoutHistory, Trade
 
 app = Flask(__name__)
+# Re-read dashboard.html when it changes on disk. Jinja otherwise caches the
+# compiled template whenever debug is off, and restarting this process to pick
+# up a UI edit also restarts the bot -- which makes it forget any order it has
+# resting on the exchange. A stat() per render is a cheap way to avoid that.
+app.config["TEMPLATES_AUTO_RELOAD"] = True
 cors = CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -25,24 +34,188 @@ config = Config()
 db = Database(logger, config)
 
 
-def filter_period(query, model):  # pylint: disable=inconsistent-return-statements
+# These models timestamp with datetime.utcnow(); CoinValue uses datetime.now().
+# Comparing a UTC column against local now() silently returns nothing for any
+# timezone east of UTC, so the cutoff has to match how each model stores time.
+# The real fix is to make every model agree, but that needs a data migration.
+_UTC_MODELS = (CurrentCoin, EquitySnapshot, RatchetEntry, ScoutHistory, Trade)
+
+_PERIOD_UNITS = {
+    "s": lambda n: timedelta(seconds=n),
+    "h": lambda n: timedelta(hours=n),
+    "d": lambda n: timedelta(days=n),
+    "w": lambda n: timedelta(weeks=n),
+    "m": lambda n: timedelta(days=28 * n),
+}
+
+
+def filter_period(query, model):
+    """Filter a query to a ?period= window, e.g. 30s / 6h / 7d / 2w / 1m."""
     period = request.args.get("period", "all")
 
     if period == "all":
         return query
 
-    num = float(re.search(r"(\d*)[shdwm]", "1d").group(1))
+    match = re.fullmatch(r"\s*(\d*)\s*([shdwm])\s*", period)
+    if match is None:
+        return query
 
-    if "s" in period:
-        return query.filter(model.datetime >= datetime.now() - timedelta(seconds=num))
-    if "h" in period:
-        return query.filter(model.datetime >= datetime.now() - timedelta(hours=num))
-    if "d" in period:
-        return query.filter(model.datetime >= datetime.now() - timedelta(days=num))
-    if "w" in period:
-        return query.filter(model.datetime >= datetime.now() - timedelta(weeks=num))
-    if "m" in period:
-        return query.filter(model.datetime >= datetime.now() - timedelta(days=28 * num))
+    num = float(match.group(1) or 1)
+    now = datetime.utcnow() if model in _UTC_MODELS else datetime.now()
+    return query.filter(model.datetime >= now - _PERIOD_UNITS[match.group(2)](num))
+
+
+# Explicit allowlist rather than a blocklist: a field added to Config later
+# must be opted in here, so an API key can never leak by default.
+_PUBLIC_CONFIG_FIELDS = (
+    "BRIDGE_SYMBOL",
+    "BINANCE_TLD",
+    "TESTNET",
+    "STRATEGY",
+    "USE_MARGIN",
+    "SCOUT_MULTIPLIER",
+    "SCOUT_MARGIN",
+    "SCOUT_SLEEP_TIME",
+    "BUY_TIMEOUT",
+    "SELL_TIMEOUT",
+)
+
+
+# Built on first use rather than at import: constructing a Client pings
+# Binance, and a key problem should not stop the dashboard from serving.
+_binance_client = None
+_binance_lock = threading.Lock()
+
+
+def binance_client() -> Client:
+    global _binance_client  # pylint: disable=global-statement
+    with _binance_lock:
+        if _binance_client is None:
+            _binance_client = Client(
+                config.BINANCE_API_KEY,
+                config.BINANCE_API_SECRET_KEY,
+                tld=config.BINANCE_TLD,
+                testnet=config.TESTNET,
+            )
+        return _binance_client
+
+
+def is_cross_origin() -> bool:
+    """
+    True when the browser says this request came from another site.
+
+    CORS on /api/* is wide open, which is fine for reads but would otherwise let
+    any page you happen to have open cancel your orders. Browsers always attach
+    Origin to a cross-site POST, so anything that does not match the host we were
+    reached on gets refused.
+    """
+    origin = request.headers.get("Origin")
+    if not origin:
+        return False
+    return urlparse(origin).netloc != request.host
+
+
+@app.route("/")
+def dashboard():
+    return render_template("dashboard.html")
+
+
+@app.route("/api/performance")
+def performance():
+    """
+    The equity curve with the benchmarks it is measured against.
+
+    Portfolio value alone cannot separate a working strategy from a rising
+    market, so every sample carries the value of the untouched starting basket
+    and of the same money held as BTC, priced at the same instant.
+    """
+    session: Session
+    with db.db_session() as session:
+        query = session.query(EquitySnapshot).order_by(EquitySnapshot.datetime.asc())
+        query = filter_period(query, EquitySnapshot)
+        series = [snapshot.info() for snapshot in query.all()]
+
+    anchor = db.get_benchmark_anchor()
+    return jsonify({"anchor": anchor.info() if anchor else None, "series": series})
+
+
+@app.route("/api/ratchet")
+def ratchet():
+    """Units held at each entry into a coin, against the previous entry."""
+    session: Session
+    with db.db_session() as session:
+        query = session.query(RatchetEntry).order_by(RatchetEntry.datetime.desc())
+        query = filter_period(query, RatchetEntry)
+        return jsonify([entry.info() for entry in query.all()])
+
+
+@app.route("/api/open_orders")
+def open_orders():
+    """
+    Orders currently resting on the exchange.
+
+    Read live from Binance, not from the database: the bot only tracks orders it
+    placed in the current process, so anything left over from a previous run is
+    invisible locally while still holding your funds.
+    """
+    try:
+        orders = binance_client().get_open_orders()
+    except BinanceAPIException as exc:
+        return jsonify({"error": "Binance rejected the request: {}".format(exc.message)}), 502
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"error": "Could not reach Binance: {}".format(exc)}), 502
+
+    return jsonify(
+        [
+            {
+                "order_id": order["orderId"],
+                "symbol": order["symbol"],
+                "side": order["side"],
+                "type": order["type"],
+                "status": order["status"],
+                "price": float(order["price"]),
+                "quantity": float(order["origQty"]),
+                "filled": float(order["executedQty"]),
+                "time": order["time"],
+            }
+            for order in orders
+        ]
+    )
+
+
+@app.route("/api/open_orders/<int:order_id>/cancel", methods=["POST"])
+def cancel_open_order(order_id: int):
+    """Cancel one resting order. Any filled portion is kept."""
+    if is_cross_origin():
+        return jsonify({"error": "Orders can only be cancelled from the dashboard itself."}), 403
+
+    payload = request.get_json(silent=True) or {}
+    symbol = payload.get("symbol") or request.args.get("symbol")
+    if not symbol:
+        return jsonify({"error": "symbol is required to cancel an order"}), 400
+
+    try:
+        result = binance_client().cancel_order(symbol=symbol, orderId=order_id)
+    except BinanceAPIException as exc:
+        return jsonify({"error": exc.message}), 400
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"error": "Could not reach Binance: {}".format(exc)}), 502
+
+    return jsonify(
+        {
+            "order_id": result["orderId"],
+            "symbol": result["symbol"],
+            "status": result["status"],
+            "filled": float(result["executedQty"]),
+            "quantity": float(result["origQty"]),
+        }
+    )
+
+
+@app.route("/api/config")
+def bot_config():
+    """Scouting parameters the dashboard needs to compute the jump threshold."""
+    return jsonify({field: getattr(config, field, None) for field in _PUBLIC_CONFIG_FIELDS})
 
 
 @app.route("/api/value_history/<coin>")

@@ -1,18 +1,22 @@
+# Coins the bot may rotate between. Lines starting with '#' are ignored.
+# EOS / OMG / XMR have no USDT pair on the Binance spot testnet, so they are
+# disabled while testnet=True. Re-enable them if you switch to production.
 ADA
 ATOM
 BAT
 BTTC
 DASH
 DOGE
-EOS
+#EOS
 ETC
+ETH
 ICX
 IOTA
 NEO
-OMG
+#OMG
 ONT
 QTUM
 TRX
 VET
 XLM
-XMR
+#XMR

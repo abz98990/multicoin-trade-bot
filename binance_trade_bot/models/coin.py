@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, String
+from sqlalchemy import Boolean, Column, DateTime, String
 
 from .base import Base
 
@@ -7,6 +7,9 @@ class Coin(Base):
     __tablename__ = "coins"
     symbol = Column(String, primary_key=True)
     enabled = Column(Boolean)
+
+    # Set when a stop-loss fires, to keep the bot from buying straight back in.
+    cooldown_until = Column(DateTime)
 
     def __init__(self, symbol, enabled=True):
         self.symbol = symbol
@@ -23,4 +26,8 @@ class Coin(Base):
         return f"[{self.symbol}]"
 
     def info(self):
-        return {"symbol": self.symbol, "enabled": self.enabled}
+        return {
+            "symbol": self.symbol,
+            "enabled": self.enabled,
+            "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else None,
+        }

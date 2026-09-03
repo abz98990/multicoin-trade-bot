@@ -14,7 +14,7 @@ class Logger:
         self.Logger.propagate = False
         formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         # default is "logs/crypto_trading.log"
-        fh = logging.FileHandler(f"logs/{logging_service}.log")
+        fh = logging.FileHandler(f"logs/{logging_service}.log", encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(formatter)
         self.Logger.addHandler(fh)

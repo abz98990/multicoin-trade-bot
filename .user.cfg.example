@@ -38,3 +38,23 @@ strategy=default
 # 0 means that the order will never be cancelled prematurely.
 buy_timeout=20
 sell_timeout=20
+
+# Price orders at the far side of the book so they fill immediately instead of
+# resting on the bid and timing out. 'no' restores the old passive behaviour.
+cross_spread=yes
+
+# Refuse to trade a pair whose bid/ask spread is wider than this percentage.
+# Crossing costs the spread, so it must stay well under your jump threshold or
+# a winning signal becomes a losing trade. 0 disables the check.
+max_spread=0.5
+
+# Risk levels, fixed when a position is opened, as a percentage of the entry
+# price. Both 0 = off. NOTE: a stop-loss sells at a loss, which the ratchet
+# strategy is otherwise built never to do - enabling it is a deliberate change
+# of strategy, not just a safety net.
+stop_loss=0
+take_profit=0
+
+# Minutes to keep a coin out of consideration after it stopped out, so the next
+# scout cannot buy straight back into it.
+stop_cooldown=60

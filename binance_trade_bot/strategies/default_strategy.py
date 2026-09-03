@@ -1,6 +1,5 @@
 import random
 import sys
-from datetime import datetime
 
 from binance_trade_bot.auto_trader import AutoTrader
 
@@ -15,14 +14,6 @@ class Strategy(AutoTrader):
         Scout for potential jumps from the current coin to another coin
         """
         current_coin = self.db.get_current_coin()
-        # Display on the console, the current coin+Bridge, so users can see *some* activity and not think the bot has
-        # stopped. Not logging though to reduce log size.
-        print(
-            f"{datetime.now()} - CONSOLE - INFO - I am scouting the best trades. "
-            f"Current coin: {current_coin + self.config.BRIDGE} ",
-            end="\r",
-        )
-
         current_coin_price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
 
         if current_coin_price is None:
@@ -40,7 +31,7 @@ class Strategy(AutoTrader):
             return
         new_coin = super().bridge_scout()
         if new_coin is not None:
-            self.db.set_current_coin(new_coin)
+            self.db.set_current_coin(new_coin, self.manager.get_ticker_price(new_coin + self.config.BRIDGE))
 
     def initialize_current_coin(self):
         """
@@ -62,4 +53,7 @@ class Strategy(AutoTrader):
                 current_coin = self.db.get_current_coin()
                 self.logger.info(f"Purchasing {current_coin} to begin trading")
                 self.manager.buy_alt(current_coin, self.config.BRIDGE)
+                self.db.set_current_coin(
+                    current_coin, self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
+                )
                 self.logger.info("Ready to start trading")

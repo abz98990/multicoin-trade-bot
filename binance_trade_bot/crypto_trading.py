@@ -38,9 +38,15 @@ def main():
 
     trader.initialize()
 
+    # Before scouting, settle anything a previous run left on the exchange -
+    # otherwise those orders sit forgotten and their balance never comes back.
+    trader.recover_open_orders()
+
     schedule = SafeScheduler(logger)
     schedule.every(config.SCOUT_SLEEP_TIME).seconds.do(trader.scout).tag("scouting")
+    schedule.every(5).seconds.do(trader.check_risk_levels).tag("checking stop-loss / take-profit")
     schedule.every(1).minutes.do(trader.update_values).tag("updating value history")
+    schedule.every(1).minutes.do(trader.log_performance).tag("sampling performance")
     schedule.every(1).minutes.do(db.prune_scout_history).tag("pruning scout history")
     schedule.every(1).hours.do(db.prune_value_history).tag("pruning value history")
     try:

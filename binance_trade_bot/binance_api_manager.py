@@ -1,5 +1,6 @@
 import math
 import time
+from datetime import datetime
 import traceback
 from typing import Dict, Optional
 
@@ -12,6 +13,19 @@ from .config import Config
 from .database import Database
 from .logger import Logger
 from .models import Coin
+
+# How many times to (re-price and re-size and) retry placing an order before
+# giving up and returning to scouting. Retrying forever cannot help: a quantity
+# rejected by a filter stays rejected, and the caller can never recover.
+ORDER_PLACEMENT_ATTEMPTS = 10
+
+
+def _exchange_time(order):
+    """The exchange's own timestamp for a placed order, as a UTC datetime."""
+    stamp = order.get("transactTime") or order.get("time")
+    if not stamp:
+        return None
+    return datetime.utcfromtimestamp(stamp / 1000)
 
 
 class BinanceAPIManager:
@@ -29,6 +43,13 @@ class BinanceAPIManager:
         self.testnet = testnet
 
         self.cache = BinanceCache()
+        # Carry forward what previous runs learned, so startup does not spend a
+        # full ticker download per missing symbol rediscovering the same set.
+        try:
+            self.cache.non_existent_tickers.update(self.db.get_unknown_tickers())
+        except Exception:  # pylint: disable=broad-except
+            pass  # a fresh database has no table yet; discovery still works
+
         self.stream_manager: Optional[BinanceStreamManager] = None
         self.setup_websockets()
 
@@ -61,9 +82,16 @@ class BinanceAPIManager:
 
     def get_fee(self, origin_coin: Coin, target_coin: Coin, selling: bool):
         base_fee = self.get_trade_fees()[origin_coin + target_coin]
-        if not self.testnet:
-            if not self.get_using_bnb_for_fees():
-                return base_fee
+
+        if self.testnet:
+            # The testnet has no BNB fee burn and lists no <coin>BNB pairs, so
+            # the discount path below can only fail its ticker lookup and land
+            # back here. Taking the shortcut avoids a guaranteed-miss lookup
+            # for every pair on every scout.
+            return base_fee
+
+        if not self.get_using_bnb_for_fees():
+            return base_fee
 
         # The discount is only applied if we have enough BNB to cover the fee
         amount_trading = (
@@ -107,6 +135,10 @@ class BinanceAPIManager:
             if price is None:
                 self.logger.info(f"Ticker does not exist: {ticker_symbol} - will not be fetched from now on")
                 self.cache.non_existent_tickers.add(ticker_symbol)
+                try:
+                    self.db.add_unknown_ticker(ticker_symbol)
+                except Exception:  # pylint: disable=broad-except
+                    pass  # remembering is an optimisation, never a hard failure
 
         return price
 
@@ -160,6 +192,91 @@ class BinanceAPIManager:
     @cached(cache=TTLCache(maxsize=2000, ttl=43200))
     def get_min_notional(self, origin_symbol: str, target_symbol: str):
         return float(self.get_symbol_filter(origin_symbol, target_symbol, "NOTIONAL")["minNotional"])
+
+    @cached(cache=TTLCache(maxsize=64, ttl=5))
+    def get_book_top(self, origin_symbol: str, target_symbol: str):
+        """Best bid and ask. Cached briefly: it is read per candidate, per jump."""
+        ticker = self.binance_client.get_orderbook_ticker(symbol=origin_symbol + target_symbol)
+        return float(ticker["bidPrice"]), float(ticker["askPrice"])
+
+    def get_spread_percent(self, origin_symbol: str, target_symbol: str):
+        """Width of the book as a percentage of its midpoint."""
+        try:
+            bid, ask = self.get_book_top(origin_symbol, target_symbol)
+        except Exception:  # pylint: disable=broad-except
+            return None
+        if not bid or not ask:
+            return None
+        return (ask - bid) / ((ask + bid) / 2) * 100
+
+    def spread_is_acceptable(self, origin_symbol: str, target_symbol: str) -> bool:
+        """
+        Whether this pair can be traded without the spread eating the gain.
+
+        A jump only has to clear its threshold by a hair, so paying a spread of
+        comparable width turns a winning signal into a losing trade.
+        """
+        if not self.config.MAX_SPREAD:
+            return True
+        spread = self.get_spread_percent(origin_symbol, target_symbol)
+        if spread is None:
+            return True  # cannot measure it; leave the decision to the caller
+        if spread > self.config.MAX_SPREAD:
+            self.logger.info(
+                f"Skipping {origin_symbol}{target_symbol}: spread {spread:.3f}% "
+                f"exceeds max_spread {self.config.MAX_SPREAD}%"
+            )
+            return False
+        return True
+
+    def get_order_price(self, origin_symbol: str, target_symbol: str, selling: bool, fallback: float):
+        """
+        The price to place an order at.
+
+        Passive orders priced at the last trade sit behind the touch and often
+        never fill - half of this bot's orders historically timed out. Pricing
+        at the far side of the book makes them marketable, so they execute on
+        placement while still capping the price, unlike a market order.
+        """
+        if self.config.CROSS_SPREAD != "yes":
+            return fallback
+        try:
+            bid, ask = self.get_book_top(origin_symbol, target_symbol)
+        except Exception:  # pylint: disable=broad-except
+            return fallback
+        price = bid if selling else ask
+        return price or fallback
+
+    @cached(cache=TTLCache(maxsize=2000, ttl=43200))
+    def get_lot_size_limits(self, origin_symbol: str, target_symbol: str):
+        lot_size = self.get_symbol_filter(origin_symbol, target_symbol, "LOT_SIZE")
+        return float(lot_size["minQty"]), float(lot_size["maxQty"])
+
+    def _clamp_to_lot_size(self, origin_symbol: str, target_symbol: str, quantity: float):
+        """
+        Apply the LOT_SIZE minQty/maxQty bounds to an order quantity.
+
+        get_alt_tick only reads stepSize, so a quantity can satisfy the step and
+        still breach the bounds - Binance answers -1013 Filter failure: LOT_SIZE,
+        and it answers the same on every retry. Returns 0 when the balance is too
+        small for any valid order.
+        """
+        min_qty, max_qty = self.get_lot_size_limits(origin_symbol, target_symbol)
+
+        if quantity > max_qty:
+            origin_tick = self.get_alt_tick(origin_symbol, target_symbol)
+            quantity = math.floor(max_qty * 10**origin_tick) / float(10**origin_tick)
+            # debug: get_fee() sizes a hypothetical trade on every scout, so this
+            # runs on a hot path. The real order quantity is logged by the caller.
+            self.logger.debug(f"Capping {origin_symbol}{target_symbol} order to LOT_SIZE maxQty {max_qty}")
+
+        if quantity < min_qty:
+            self.logger.debug(
+                f"{origin_symbol}{target_symbol} quantity {quantity} is below LOT_SIZE minQty {min_qty}"
+            )
+            return 0.0
+
+        return quantity
 
     def _wait_for_order(
         self, order_id, origin_symbol: str, target_symbol: str
@@ -246,6 +363,25 @@ class BinanceAPIManager:
 
         return False
 
+    def get_open_orders(self):
+        """Orders currently resting on the exchange, across all symbols."""
+        return self.binance_client.get_open_orders()
+
+    def resume_order(self, origin_symbol: str, target_symbol: str, order_id: int) -> Optional[BinanceOrder]:
+        """
+        Adopt an order placed by an earlier run and see it through.
+
+        pending_orders is in-memory, so after a restart nothing polls a resting
+        order and its buy/sell timeout can never fire - the balance it reserves
+        stays locked out of trading indefinitely. Registering it here puts it
+        back under the normal machinery. _should_cancel_order measures age from
+        the order's own timestamp, so one that already outlived its timeout is
+        cancelled on the first check rather than waited on again.
+        """
+        order_guard = self.stream_manager.acquire_order_guard()
+        order_guard.set_order(origin_symbol, target_symbol, order_id)
+        return self.wait_for_order(order_id, origin_symbol, target_symbol, order_guard)
+
     def buy_alt(self, origin_coin: Coin, target_coin: Coin) -> BinanceOrder:
         return self.retry(self._buy_alt, origin_coin, target_coin)
 
@@ -260,13 +396,13 @@ class BinanceAPIManager:
         from_coin_price = from_coin_price or self.get_ticker_price(origin_symbol + target_symbol)
 
         origin_tick = self.get_alt_tick(origin_symbol, target_symbol)
-        return math.floor(target_balance * 10**origin_tick / from_coin_price) / float(10**origin_tick)
+        quantity = math.floor(target_balance * 10**origin_tick / from_coin_price) / float(10**origin_tick)
+        return self._clamp_to_lot_size(origin_symbol, target_symbol, quantity)
 
     def _buy_alt(self, origin_coin: Coin, target_coin: Coin):  # pylint: disable=too-many-locals
         """
         Buy altcoin
         """
-        trade_log = self.db.start_trade_log(origin_coin, target_coin, False)
         origin_symbol = origin_coin.symbol
         target_symbol = target_coin.symbol
 
@@ -276,7 +412,8 @@ class BinanceAPIManager:
         origin_balance = self.get_currency_balance(origin_symbol)
         target_balance = self.get_currency_balance(target_symbol)
         pair_info = self.binance_client.get_symbol_info(origin_symbol + target_symbol)
-        from_coin_price = self.get_ticker_price(origin_symbol + target_symbol)
+        decision_price = self.get_ticker_price(origin_symbol + target_symbol)
+        from_coin_price = self.get_order_price(origin_symbol, target_symbol, False, decision_price)
         from_coin_price_s = "{:0.0{}f}".format(from_coin_price, pair_info["quotePrecision"])
 
         order_quantity = self._buy_quantity(origin_symbol, target_symbol, target_balance, from_coin_price)
@@ -284,24 +421,64 @@ class BinanceAPIManager:
 
         self.logger.info(f"BUY QTY {order_quantity}")
 
-        # Try to buy until successful
+        if order_quantity <= 0:
+            # Bail before opening a trade log. This path repeats on every scout
+            # for as long as the balance is short, and a log opened here would
+            # leave another orphaned STARTING row behind on each pass.
+            self.logger.warning(
+                f"Not enough {target_symbol} to buy {origin_symbol}, going back to scouting mode..."
+            )
+            return None
+
+        trade_log = self.db.start_trade_log(origin_coin, target_coin, False)
         order = None
         order_guard = self.stream_manager.acquire_order_guard()
-        while order is None:
-            try:
-                order = self.binance_client.order_limit_buy(
-                    symbol=origin_symbol + target_symbol,
-                    quantity=order_quantity_s,
-                    price=from_coin_price_s,
-                )
-                self.logger.info(order)
-            except BinanceAPIException as e:
-                self.logger.info(e)
-                time.sleep(1)
-            except Exception as e:  # pylint: disable=broad-except
-                self.logger.warning(f"Unexpected Error: {e}")
+        try:
+            for _ in range(ORDER_PLACEMENT_ATTEMPTS):
+                if order_quantity <= 0:
+                    break
+                try:
+                    order = self.binance_client.order_limit_buy(
+                        symbol=origin_symbol + target_symbol,
+                        quantity=order_quantity_s,
+                        price=from_coin_price_s,
+                    )
+                    self.logger.info(order)
+                    break
+                except BinanceAPIException as e:
+                    self.logger.info(e)
+                except Exception as e:  # pylint: disable=broad-except
+                    self.logger.warning(f"Unexpected Error: {e}")
 
-        trade_log.set_ordered(origin_balance, target_balance, order_quantity)
+                time.sleep(1)
+                # Re-price and re-size before retrying. Resubmitting a rejected
+                # order unchanged can never succeed, and a stale limit price
+                # drifts away from the book while we wait.
+                refreshed_price = self.get_ticker_price(origin_symbol + target_symbol)
+                if refreshed_price is not None:
+                    from_coin_price = refreshed_price
+                    from_coin_price_s = "{:0.0{}f}".format(from_coin_price, pair_info["quotePrecision"])
+                target_balance = self.get_currency_balance(target_symbol, True)
+                order_quantity = self._buy_quantity(
+                    origin_symbol, target_symbol, target_balance, from_coin_price
+                )
+                order_quantity_s = "{:0.0{}f}".format(order_quantity, pair_info["baseAssetPrecision"])
+        finally:
+            if order is None:
+                order_guard.cancel()
+
+        if order is None:
+            self.logger.warning(f"Couldn't place a buy order for {origin_symbol}, going back to scouting mode...")
+            return None
+
+        trade_log.set_ordered(
+            origin_balance,
+            target_balance,
+            order_quantity,
+            int(order["orderId"]),
+            decision_price,
+            _exchange_time(order),
+        )
 
         order_guard.set_order(origin_symbol, target_symbol, int(order["orderId"]))
         order = self.wait_for_order(order["orderId"], origin_symbol, target_symbol, order_guard)
@@ -311,7 +488,7 @@ class BinanceAPIManager:
 
         self.logger.info(f"Bought {origin_symbol}")
 
-        trade_log.set_complete(order.cumulative_quote_qty)
+        trade_log.set_complete(order.cumulative_quote_qty, order.price)
 
         return order
 
@@ -322,13 +499,13 @@ class BinanceAPIManager:
         origin_balance = origin_balance or self.get_currency_balance(origin_symbol)
 
         origin_tick = self.get_alt_tick(origin_symbol, target_symbol)
-        return math.floor(origin_balance * 10**origin_tick) / float(10**origin_tick)
+        quantity = math.floor(origin_balance * 10**origin_tick) / float(10**origin_tick)
+        return self._clamp_to_lot_size(origin_symbol, target_symbol, quantity)
 
     def _sell_alt(self, origin_coin: Coin, target_coin: Coin):  # pylint: disable=too-many-locals
         """
         Sell altcoin
         """
-        trade_log = self.db.start_trade_log(origin_coin, target_coin, True)
         origin_symbol = origin_coin.symbol
         target_symbol = target_coin.symbol
 
@@ -339,7 +516,8 @@ class BinanceAPIManager:
         target_balance = self.get_currency_balance(target_symbol)
 
         pair_info = self.binance_client.get_symbol_info(origin_symbol + target_symbol)
-        from_coin_price = self.get_ticker_price(origin_symbol + target_symbol)
+        decision_price = self.get_ticker_price(origin_symbol + target_symbol)
+        from_coin_price = self.get_order_price(origin_symbol, target_symbol, True, decision_price)
         from_coin_price_s = "{:0.0{}f}".format(from_coin_price, pair_info["quotePrecision"])
 
         order_quantity = self._sell_quantity(origin_symbol, target_symbol, origin_balance)
@@ -347,20 +525,60 @@ class BinanceAPIManager:
         self.logger.info(f"Selling {order_quantity} of {origin_symbol}")
 
         self.logger.info(f"Balance is {origin_balance}")
+
+        if order_quantity <= 0:
+            self.logger.warning(
+                f"Nothing sellable in {origin_symbol}, going back to scouting mode..."
+            )
+            return None
+
+        trade_log = self.db.start_trade_log(origin_coin, target_coin, True)
         order = None
         order_guard = self.stream_manager.acquire_order_guard()
-        while order is None:
-            # Should sell at calculated price to avoid lost coin
-            order = self.binance_client.order_limit_sell(
-                symbol=origin_symbol + target_symbol,
-                quantity=(order_quantity_s),
-                price=from_coin_price_s,
-            )
+        try:
+            for _ in range(ORDER_PLACEMENT_ATTEMPTS):
+                if order_quantity <= 0:
+                    break
+                try:
+                    # Should sell at calculated price to avoid lost coin
+                    order = self.binance_client.order_limit_sell(
+                        symbol=origin_symbol + target_symbol,
+                        quantity=(order_quantity_s),
+                        price=from_coin_price_s,
+                    )
+                    break
+                except BinanceAPIException as e:
+                    self.logger.info(e)
+                except Exception as e:  # pylint: disable=broad-except
+                    self.logger.warning(f"Unexpected Error: {e}")
+
+                time.sleep(1)
+                refreshed_price = self.get_ticker_price(origin_symbol + target_symbol)
+                if refreshed_price is not None:
+                    from_coin_price = refreshed_price
+                    from_coin_price_s = "{:0.0{}f}".format(from_coin_price, pair_info["quotePrecision"])
+                origin_balance = self.get_currency_balance(origin_symbol, True)
+                order_quantity = self._sell_quantity(origin_symbol, target_symbol, origin_balance)
+                order_quantity_s = "{:0.0{}f}".format(order_quantity, pair_info["baseAssetPrecision"])
+        finally:
+            if order is None:
+                order_guard.cancel()
+
+        if order is None:
+            self.logger.warning(f"Couldn't place a sell order for {origin_symbol}, going back to scouting mode...")
+            return None
 
         self.logger.info("order")
         self.logger.info(order)
 
-        trade_log.set_ordered(origin_balance, target_balance, order_quantity)
+        trade_log.set_ordered(
+            origin_balance,
+            target_balance,
+            order_quantity,
+            int(order["orderId"]),
+            decision_price,
+            _exchange_time(order),
+        )
 
         order_guard.set_order(origin_symbol, target_symbol, int(order["orderId"]))
         order = self.wait_for_order(order["orderId"], origin_symbol, target_symbol, order_guard)
@@ -374,6 +592,6 @@ class BinanceAPIManager:
 
         self.logger.info(f"Sold {origin_symbol}")
 
-        trade_log.set_complete(order.cumulative_quote_qty)
+        trade_log.set_complete(order.cumulative_quote_qty, order.price)
 
         return order

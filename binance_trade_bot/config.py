@@ -23,6 +23,11 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
             "strategy": "default",
             "sell_timeout": "0",
             "buy_timeout": "0",
+            "cross_spread": "yes",
+            "max_spread": "0.5",
+            "stop_loss": "0",
+            "take_profit": "0",
+            "stop_cooldown": "60",
             "testnet": False,
         }
 
@@ -76,4 +81,27 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.BUY_TIMEOUT = os.environ.get("BUY_TIMEOUT") or config.get(USER_CFG_SECTION, "buy_timeout")
 
         self.USE_MARGIN = os.environ.get("USE_MARGIN") or config.get(USER_CFG_SECTION, "use_margin")
+
+        # Price orders at the far side of the book so they fill on placement
+        # instead of resting on the bid and timing out.
+        self.CROSS_SPREAD = (os.environ.get("CROSS_SPREAD") or config.get(USER_CFG_SECTION, "cross_spread")).lower()
+
+        # Crossing costs the spread. Above this width the spread is a large
+        # fraction of the jump threshold and the trade is not worth making;
+        # keep it well under your threshold. 0 disables the check.
+        self.MAX_SPREAD = float(os.environ.get("MAX_SPREAD") or config.get(USER_CFG_SECTION, "max_spread"))
+
+        # Conventional risk levels, set when a position is opened and measured
+        # against the entry price. Both 0 by default: a stop-loss sells at a
+        # loss, which is exactly what the ratchet is built never to do, so it
+        # has to be opted into deliberately.
+        self.STOP_LOSS = float(os.environ.get("STOP_LOSS") or config.get(USER_CFG_SECTION, "stop_loss"))
+        self.TAKE_PROFIT = float(os.environ.get("TAKE_PROFIT") or config.get(USER_CFG_SECTION, "take_profit"))
+
+        # After stopping out, hold that coin out of consideration for a while.
+        # Without it the very next scout can buy straight back into the coin it
+        # just stopped out of, which makes the stop pointless.
+        self.STOP_COOLDOWN = float(
+            os.environ.get("STOP_COOLDOWN") or config.get(USER_CFG_SECTION, "stop_cooldown")
+        )
         self.SCOUT_MARGIN = float(os.environ.get("SCOUT_MARGIN") or config.get(USER_CFG_SECTION, "scout_margin"))

@@ -95,15 +95,68 @@ class Database:
             session.expunge(coin)
             return coin
 
-    def set_current_coin(self, coin: Union[Coin, str]):
+    def risk_levels(self, entry_price):
+        """Stop-loss and take-profit for a position opened at this price."""
+        if not entry_price:
+            return None, None
+        stop = entry_price * (1 - self.config.STOP_LOSS / 100) if self.config.STOP_LOSS else None
+        target = entry_price * (1 + self.config.TAKE_PROFIT / 100) if self.config.TAKE_PROFIT else None
+        return stop, target
+
+    def set_current_coin(self, coin: Union[Coin, str], entry_price: float = None):
         coin = self.get_coin(coin)
+        # Read the symbol now: merging rebinds `coin` to an instance that is
+        # detached and expired once the session closes, so touching it after
+        # the block raises DetachedInstanceError.
+        symbol = coin.symbol if isinstance(coin, Coin) else str(coin)
+        stop_loss, take_profit = self.risk_levels(entry_price)
+
         session: Session
         with self.db_session() as session:
-            if isinstance(coin, Coin):
-                coin = session.merge(coin)
-            cc = CurrentCoin(coin)
+            merged = session.merge(coin) if isinstance(coin, Coin) else coin
+            cc = CurrentCoin(merged, entry_price, stop_loss, take_profit)
             session.add(cc)
             self.send_update(cc)
+
+        if entry_price and (stop_loss or take_profit):
+            levels = []
+            if stop_loss:
+                levels.append(f"stop {stop_loss:.8g}")
+            if take_profit:
+                levels.append(f"target {take_profit:.8g}")
+            self.logger.info(f"Opened {symbol} at {entry_price:.8g} ({', '.join(levels)})")
+
+    def get_current_position(self):
+        """The open position with its risk levels, or None."""
+        session: Session
+        with self.db_session() as session:
+            position = session.query(CurrentCoin).order_by(CurrentCoin.datetime.desc()).first()
+            if position is None:
+                return None
+            info = position.info()
+            return info
+
+    def start_cooldown(self, coin: Union[Coin, str], minutes: float):
+        """Keep a coin out of consideration after it stopped out."""
+        if not minutes:
+            return
+        symbol = coin.symbol if isinstance(coin, Coin) else coin
+        until = datetime.utcnow() + timedelta(minutes=minutes)
+        session: Session
+        with self.db_session() as session:
+            row: Coin = session.query(Coin).get(symbol)
+            if row is not None:
+                row.cooldown_until = until
+        self.logger.info(f"{symbol} on cooldown until {until.isoformat(timespec='seconds')} UTC")
+
+    def is_cooling_down(self, coin: Union[Coin, str]) -> bool:
+        symbol = coin.symbol if isinstance(coin, Coin) else coin
+        session: Session
+        with self.db_session() as session:
+            row: Coin = session.query(Coin).get(symbol)
+            if row is None or row.cooldown_until is None:
+                return False
+            return row.cooldown_until > datetime.utcnow()
 
     def get_current_coin(self) -> Optional[Coin]:
         session: Session
@@ -160,7 +213,10 @@ class Database:
             self.send_update(sh)
 
     def prune_scout_history(self):
-        time_diff = datetime.now() - timedelta(hours=self.config.SCOUT_HISTORY_PRUNE_TIME)
+        # ScoutHistory.datetime is written with utcnow(), so the cutoff has to be
+        # UTC as well. Using local now() any distance east of UTC puts the cutoff
+        # ahead of every stored row and wipes the whole table on each run.
+        time_diff = datetime.utcnow() - timedelta(hours=self.config.SCOUT_HISTORY_PRUNE_TIME)
         session: Session
         with self.db_session() as session:
             session.query(ScoutHistory).filter(ScoutHistory.datetime < time_diff).delete()
@@ -211,11 +267,149 @@ class Database:
 
             # All weekly entries will be kept forever
 
+    # (table, column, SQL type) for columns added after this schema first shipped.
+    # create_all() only creates missing tables; it never alters an existing one,
+    # so anyone with an older database file needs the column added explicitly.
+    SCHEMA_MIGRATIONS = (
+        ("trade_history", "order_id", "INTEGER"),
+        ("trade_history", "decision_price", "FLOAT"),
+        ("trade_history", "fill_price", "FLOAT"),
+        ("trade_history", "ordered_ts", "DATETIME"),
+        ("trade_history", "fill_ts", "DATETIME"),
+        ("current_coin_history", "entry_price", "FLOAT"),
+        ("current_coin_history", "stop_loss", "FLOAT"),
+        ("current_coin_history", "take_profit", "FLOAT"),
+        ("coins", "cooldown_until", "DATETIME"),
+    )
+
     def create_database(self):
         Base.metadata.create_all(self.engine)
+        self.apply_schema_migrations()
+
+    def apply_schema_migrations(self):
+        """Add any missing columns to an existing database. Safe to re-run."""
+        with self.engine.begin() as connection:
+            for table, column, column_type in self.SCHEMA_MIGRATIONS:
+                rows = connection.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+                if not rows:
+                    continue  # table does not exist yet; create_all will make it
+                if column in {row[1] for row in rows}:
+                    continue
+                connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+                self.logger.info(f"Database migration: added {table}.{column}")
+
+    def finish_trade(self, order_id: int, state: TradeState, crypto_trade_amount: float = None):
+        """
+        Close out the trade row for an order settled outside its original flow.
+
+        Used by restart recovery: the TradeLog that opened the row belonged to a
+        process that is gone, so the row is found by order id instead.
+        """
+        if order_id is None:
+            return False
+        session: Session
+        with self.db_session() as session:
+            trade: Trade = session.query(Trade).filter(Trade.order_id == order_id).first()
+            if trade is None:
+                return False
+            if crypto_trade_amount is not None:
+                trade.crypto_trade_amount = crypto_trade_amount
+            if state == TradeState.COMPLETE:
+                trade.fill_ts = datetime.utcnow()
+            trade.state = state
+            self.send_update(trade)
+            return True
+
+    # A symbol missing today can be listed later, so forget what we learned
+    # after a while rather than staying blind to it permanently.
+    UNKNOWN_TICKER_TTL_DAYS = 7
+
+    def get_unknown_tickers(self) -> set:
+        """Symbols known to be absent, still within their re-check window."""
+        cutoff = datetime.utcnow() - timedelta(days=self.UNKNOWN_TICKER_TTL_DAYS)
+        session: Session
+        with self.db_session() as session:
+            rows = session.query(UnknownTicker).filter(UnknownTicker.datetime >= cutoff).all()
+            return {row.symbol for row in rows}
+
+    def add_unknown_ticker(self, symbol: str):
+        session: Session
+        with self.db_session() as session:
+            row: UnknownTicker = session.query(UnknownTicker).get(symbol)
+            if row is None:
+                session.add(UnknownTicker(symbol))
+            else:
+                row.datetime = datetime.utcnow()
 
     def start_trade_log(self, from_coin: Coin, to_coin: Coin, selling: bool):
         return TradeLog(self, from_coin, to_coin, selling)
+
+    # ----------------------------------------------------------- performance
+
+    def get_benchmark_anchor(self) -> Optional[BenchmarkAnchor]:
+        session: Session
+        with self.db_session() as session:
+            anchor = session.query(BenchmarkAnchor).order_by(BenchmarkAnchor.id.asc()).first()
+            if anchor is not None:
+                session.expunge(anchor)
+            return anchor
+
+    def set_benchmark_anchor(self, holdings: dict, total_usdt: float, btc_price: float):
+        """
+        Fix the point every benchmark is measured from. Only ever set once
+        unless deliberately reset, or the comparison moves with the portfolio
+        and always flatters it.
+        """
+        session: Session
+        with self.db_session() as session:
+            anchor = BenchmarkAnchor(holdings, total_usdt, btc_price)
+            session.add(anchor)
+            session.flush()
+            session.expunge(anchor)
+            self.logger.info(
+                f"Benchmark anchored at {total_usdt:.2f} {self.config.BRIDGE.symbol} "
+                f"across {len(holdings)} asset(s)"
+            )
+            return anchor
+
+    def clear_benchmark_anchor(self):
+        session: Session
+        with self.db_session() as session:
+            return session.query(BenchmarkAnchor).delete()
+
+    def log_equity(self, snapshot: EquitySnapshot):
+        session: Session
+        with self.db_session() as session:
+            session.add(snapshot)
+            self.send_update(snapshot)
+
+    def last_ratchet_units(self, coin: Union[Coin, str]) -> Optional[float]:
+        """Units held the last time this coin was entered, if ever."""
+        symbol = coin.symbol if isinstance(coin, Coin) else coin
+        session: Session
+        with self.db_session() as session:
+            entry = (
+                session.query(RatchetEntry)
+                .filter(RatchetEntry.coin_id == symbol)
+                .order_by(RatchetEntry.datetime.desc())
+                .first()
+            )
+            return entry.units if entry else None
+
+    def log_ratchet(self, coin: Coin, units: float):
+        """Record an entry into a coin against the previous one."""
+        previous = self.last_ratchet_units(coin)
+        session: Session
+        with self.db_session() as session:
+            entry = RatchetEntry(session.merge(coin), units, previous)
+            session.add(entry)
+            self.send_update(entry)
+            if entry.ratio is not None:
+                verdict = "up" if entry.ratio >= 1 else "DOWN"
+                self.logger.info(
+                    f"Ratchet {coin.symbol}: {units:.8g} units vs {previous:.8g} last time "
+                    f"({entry.ratio:.4f}x, {verdict})"
+                )
 
     def send_update(self, model):
         if not self.socketio_connect():
@@ -271,21 +465,34 @@ class TradeLog:
             session.flush()
             self.db.send_update(self.trade)
 
-    def set_ordered(self, alt_starting_balance, crypto_starting_balance, alt_trade_amount):
+    def set_ordered(
+        self,
+        alt_starting_balance,
+        crypto_starting_balance,
+        alt_trade_amount,
+        order_id=None,
+        decision_price=None,
+        ordered_ts=None,
+    ):
         session: Session
         with self.db.db_session() as session:
             trade: Trade = session.merge(self.trade)
             trade.alt_starting_balance = alt_starting_balance
             trade.alt_trade_amount = alt_trade_amount
             trade.crypto_starting_balance = crypto_starting_balance
+            trade.order_id = order_id
+            trade.decision_price = decision_price
+            trade.ordered_ts = ordered_ts or datetime.utcnow()
             trade.state = TradeState.ORDERED
             self.db.send_update(trade)
 
-    def set_complete(self, crypto_trade_amount):
+    def set_complete(self, crypto_trade_amount, fill_price=None):
         session: Session
         with self.db.db_session() as session:
             trade: Trade = session.merge(self.trade)
             trade.crypto_trade_amount = crypto_trade_amount
+            trade.fill_price = fill_price
+            trade.fill_ts = datetime.utcnow()
             trade.state = TradeState.COMPLETE
             self.db.send_update(trade)
 

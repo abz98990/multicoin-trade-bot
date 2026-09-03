@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from traceback import format_exc
 from typing import Dict
 
+from binance.exceptions import BinanceAPIException
 from sqlitedict import SqliteDict
 
 from .binance_api_manager import BinanceAPIManager
@@ -39,6 +40,13 @@ class MockBinanceManager(BinanceAPIManager):
     def get_fee(self, origin_coin: Coin, target_coin: Coin, selling: bool):
         return 0.00075
 
+    def spread_is_acceptable(self, origin_symbol: str, target_symbol: str) -> bool:
+        # Historical klines carry no book, so spread cannot be replayed.
+        return True
+
+    def get_order_price(self, origin_symbol: str, target_symbol: str, selling: bool, fallback: float):
+        return fallback
+
     def get_ticker_price(self, ticker_symbol: str):
         """
         Get ticker price of a specific coin
@@ -47,14 +55,27 @@ class MockBinanceManager(BinanceAPIManager):
         key = f"{ticker_symbol} - {target_date}"
         val = cache.get(key, None)
         if val is None:
+            # Mirrors BinanceAPIManager.get_ticker_price: a symbol that no
+            # longer exists (e.g. a delisted <coin>BTC pair) must not abort
+            # the whole backtest, and must not be re-requested every minute.
+            if ticker_symbol in self.cache.non_existent_tickers:
+                return None
             end_date = self.datetime + timedelta(minutes=1000)
             if end_date > datetime.now():
                 end_date = datetime.now()
             end_date = end_date.strftime("%d %b %Y %H:%M:%S")
             self.logger.info(f"Fetching prices for {ticker_symbol} between {self.datetime} and {end_date}")
-            for result in self.binance_client.get_historical_klines(
-                ticker_symbol, "1m", target_date, end_date, limit=1000
-            ):
+            try:
+                klines = self.binance_client.get_historical_klines(
+                    ticker_symbol, "1m", target_date, end_date, limit=1000
+                )
+            except BinanceAPIException as e:
+                if e.code != -1121:  # -1121 == Invalid symbol
+                    raise
+                self.logger.info(f"Ticker does not exist: {ticker_symbol} - will not be fetched from now on")
+                self.cache.non_existent_tickers.add(ticker_symbol)
+                return None
+            for result in klines:
                 date = datetime.utcfromtimestamp(result[0] / 1000).strftime("%d %b %Y %H:%M:%S")
                 price = float(result[1])
                 cache[f"{ticker_symbol} - {date}"] = price

@@ -2,6 +2,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from traceback import format_exc
 from typing import Dict, Set, Tuple
 
 import binance.client
@@ -10,6 +11,18 @@ from unicorn_binance_websocket_api import BinanceWebSocketApiManager
 
 from .config import Config
 from .logger import Logger
+
+
+# Binance retired POST /api/v3/userDataStream (it now answers 410 Gone on
+# both testnet and production), so the !userData stream can no longer be
+# opened and executionReport events never arrive. Order state is polled
+# over REST instead -- see _order_poller.
+ORDER_POLL_INTERVAL = 1.0
+
+# unicorn-binance-websocket-api 1.34.2 hardcodes the retired
+# wss://testnet.binance.vision/ host, which now answers 404 on the
+# websocket handshake. Binance serves spot testnet streams from here.
+TESTNET_WEBSOCKET_BASE_URI = "wss://stream.testnet.binance.vision/"
 
 
 class BinanceOrder:  # pylint: disable=too-few-public-methods
@@ -49,6 +62,23 @@ class OrderGuard:
         # should be entered and put tag that shouldn't be missed
         self.mutex.acquire()
         self.tag = None
+        self._released = False
+
+    def _release(self):
+        if not self._released:
+            self._released = True
+            self.mutex.release()
+
+    def cancel(self):
+        """
+        Abandon a guard that was acquired but never armed with set_order.
+
+        __init__ takes the mutex and only __enter__ hands it back, so a caller
+        that gives up before placing its order would otherwise hold the lock for
+        the life of the process, blocking the order poller and every subsequent
+        acquire_order_guard().
+        """
+        self._release()
 
     def set_order(self, origin_symbol: str, target_symbol: str, order_id: int):
         self.tag = (origin_symbol + target_symbol, order_id)
@@ -59,7 +89,7 @@ class OrderGuard:
                 raise Exception("OrderGuard wasn't properly set")
             self.pending_orders.add(self.tag)
         finally:
-            self.mutex.release()
+            self._release()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.pending_orders.remove(self.tag)
@@ -83,23 +113,22 @@ class BinanceStreamManager:
             enable_stream_signal_buffer=True,
             exchange=exchange_name,
         )
+        if config.TESTNET:
+            self.bw_api_manager.websocket_base_uri = TESTNET_WEBSOCKET_BASE_URI
         self.bw_api_manager.create_stream(
             ["arr"],
             ["!miniTicker"],
             api_key=config.BINANCE_API_KEY,
             api_secret=config.BINANCE_API_SECRET_KEY,
         )
-        self.bw_api_manager.create_stream(
-            ["arr"],
-            ["!userData"],
-            api_key=config.BINANCE_API_KEY,
-            api_secret=config.BINANCE_API_SECRET_KEY,
-        )
         self.binance_client = binance_client
         self.pending_orders: Set[Tuple[str, int]] = set()
         self.pending_orders_mutex: threading.Lock = threading.Lock()
+        self._stop_event = threading.Event()
         self._processorThread = threading.Thread(target=self._stream_processor)
         self._processorThread.start()
+        self._orderPollerThread = threading.Thread(target=self._order_poller, daemon=True)
+        self._orderPollerThread.start()
 
     def acquire_order_guard(self):
         return OrderGuard(self.pending_orders, self.pending_orders_mutex)
@@ -128,11 +157,30 @@ class BinanceStreamManager:
                 "order_price": float(order["price"]),
                 "transaction_time": order["time"],
             }
-            self.logger.info(
-                f"Pending order {order_id} for symbol {symbol} fetched:\n{fake_report}",
-                False,
-            )
+            known = self.cache.orders.get(fake_report["order_id"], None)
+            if known is None or known.status != fake_report["current_order_status"]:
+                self.logger.info(
+                    f"Pending order {order_id} for symbol {symbol} fetched:\n{fake_report}",
+                    False,
+                )
             self.cache.orders[fake_report["order_id"]] = BinanceOrder(fake_report)
+
+    def _order_poller(self):
+        """
+        Stand-in for the retired !userData stream. While any order is in flight,
+        poll its state over REST so that _wait_for_order can observe the fill.
+        """
+        while not self._stop_event.is_set():
+            with self.pending_orders_mutex:
+                has_pending = bool(self.pending_orders)
+            if has_pending:
+                try:
+                    self._fetch_pending_orders()
+                    # executionReport used to invalidate these for us
+                    self._invalidate_balances()
+                except Exception:  # pylint: disable=broad-except
+                    self.logger.warning(f"Error while polling pending orders...\n{format_exc()}", False)
+            self._stop_event.wait(ORDER_POLL_INTERVAL)
 
     def _invalidate_balances(self):
         with self.cache.open_balances() as balances:
@@ -147,14 +195,10 @@ class BinanceStreamManager:
             stream_data = self.bw_api_manager.pop_stream_data_from_stream_buffer()
 
             if stream_signal is not False:
-                signal_type = stream_signal["type"]
-                stream_id = stream_signal["stream_id"]
-                if signal_type == "CONNECT":
-                    stream_info = self.bw_api_manager.get_stream_info(stream_id)
-                    if "!userData" in stream_info["markets"]:
-                        self.logger.debug("Connect for userdata arrived", False)
-                        self._fetch_pending_orders()
-                        self._invalidate_balances()
+                # Signals are still drained so the buffer cannot grow unbounded.
+                # The !userData CONNECT handler that used to live here went away
+                # with the stream itself; _order_poller covers that job now.
+                pass
             if stream_data is not False:
                 self._process_stream_data(stream_data)
             if stream_data is False and stream_signal is False:
@@ -187,4 +231,5 @@ class BinanceStreamManager:
             self.logger.error(f"Unknown event type found: {event_type}\n{stream_data}")
 
     def close(self):
+        self._stop_event.set()
         self.bw_api_manager.stop_manager_with_all_streams()

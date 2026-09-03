@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from binance_trade_bot.auto_trader import AutoTrader
 
 
@@ -31,14 +29,6 @@ class Strategy(AutoTrader):
                 continue
 
             have_coin = True
-
-            # Display on the console, the current coin+Bridge, so users can see *some* activity and not think the bot
-            # has stopped. Not logging though to reduce log size.
-            print(
-                f"{datetime.now()} - CONSOLE - INFO - I am scouting the best trades. "
-                f"Current coin: {coin + self.config.BRIDGE} ",
-                end="\r",
-            )
 
             self._jump_to_best_coin(coin, coin_price)
 

@@ -1,0 +1,1019 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Binance Trade Bot</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#161b22; --panel-2:#1b222c; --line:#262d38;
+    --fg:#e6edf3; --dim:#8b98a8; --faint:#5d6b7d;
+    --up:#3fb950; --down:#f85149; --accent:#d29922; --link:#58a6ff;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f6f8fa; --panel:#fff; --panel-2:#f0f3f6; --line:#d8dee4;
+      --fg:#1f2328; --dim:#59636e; --faint:#8c959f;
+      --up:#1a7f37; --down:#cf222e; --accent:#9a6700; --link:#0969da;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+  a{color:var(--link)}
+  .wrap{max-width:1440px;margin:0 auto;padding:20px}
+
+  header{display:flex;flex-wrap:wrap;gap:16px;align-items:center;
+    justify-content:space-between;margin-bottom:18px}
+  .brand{display:flex;align-items:baseline;gap:10px}
+  .brand h1{font-size:17px;margin:0;font-weight:600;letter-spacing:-.01em}
+  .tag{font:600 10px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
+    padding:4px 7px;border-radius:4px;border:1px solid var(--line);color:var(--dim)}
+  .tag.net{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+  .controls{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim)}
+  .controls button{font:inherit;color:var(--fg);background:var(--panel);
+    border:1px solid var(--line);border-radius:6px;padding:5px 10px;cursor:pointer}
+  .controls button:hover{background:var(--panel-2)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--up);display:inline-block;
+    margin-right:6px;vertical-align:middle}
+  .dot.stale{background:var(--down)}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));
+    gap:10px;margin-bottom:18px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
+  .stat .k{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+  .stat .v{font:600 21px/1.25 var(--mono);margin-top:5px;word-break:break-all}
+  .stat .s{font-size:11px;color:var(--faint);margin-top:3px}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+    overflow:hidden;display:flex;flex-direction:column}
+  .card.wide{grid-column:1/-1}
+  .card h2{font-size:12px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line);
+    color:var(--dim);text-transform:uppercase;letter-spacing:.06em;font-weight:600;
+    display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .card h2 .note{text-transform:none;letter-spacing:0;color:var(--faint);font-weight:400}
+  .body{padding:12px 14px;overflow-x:auto}
+  .body.flush{padding:0}
+
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th{text-align:left;font-size:11px;color:var(--dim);font-weight:600;
+    text-transform:uppercase;letter-spacing:.04em;padding:9px 14px;
+    border-bottom:1px solid var(--line);white-space:nowrap;position:sticky;top:0;
+    background:var(--panel)}
+  td{padding:9px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:var(--panel-2)}
+  .num{font-family:var(--mono);text-align:right}
+  .up{color:var(--up)} .down{color:var(--down)} .dimtxt{color:var(--dim)}
+  .coin{font-family:var(--mono);font-weight:600}
+  .scroll{max-height:380px;overflow-y:auto}
+
+  .bar{position:relative;height:5px;border-radius:3px;background:var(--panel-2);
+    min-width:70px;overflow:hidden}
+  .bar>i{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--dim)}
+  .bar>i.close{background:var(--accent)}
+  .bar>i.go{background:var(--up)}
+
+  .pill{display:inline-block;font:600 10px/1 var(--mono);padding:3px 6px;border-radius:4px;
+    border:1px solid var(--line);color:var(--dim)}
+  .pill.buy{color:var(--up);border-color:color-mix(in srgb,var(--up) 45%,transparent)}
+  .pill.sell{color:var(--down);border-color:color-mix(in srgb,var(--down) 45%,transparent)}
+
+  .btn{font:600 11px/1 var(--mono);letter-spacing:.04em;text-transform:uppercase;
+    color:var(--fg);background:var(--panel-2);border:1px solid var(--line);
+    border-radius:5px;padding:6px 11px;cursor:pointer}
+  .btn:hover:not(:disabled){border-color:var(--down);color:var(--down)}
+  .btn:disabled{opacity:.5;cursor:default}
+  .btn.armed{background:var(--down);border-color:var(--down);color:#fff}
+  .btn:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+
+  .range{position:relative;height:56px;margin:6px 0 2px}
+  .range .track{position:absolute;left:0;right:0;top:24px;height:7px;border-radius:4px;
+    background:var(--panel-2);overflow:hidden}
+  .range .track i{position:absolute;top:0;bottom:0;left:0;border-radius:4px}
+  .range .tick{position:absolute;top:18px;width:2px;height:19px;background:var(--dim);
+    transform:translateX(-1px)}
+  .range .now{position:absolute;top:14px;width:3px;height:27px;border-radius:2px;
+    background:var(--fg);transform:translateX(-1.5px);box-shadow:0 0 0 3px var(--panel)}
+  .range .cap{position:absolute;font:600 10px/1 var(--mono);letter-spacing:.04em;
+    text-transform:uppercase;white-space:nowrap}
+  .range .cap.lo{left:0;top:2px;color:var(--down)}
+  .range .cap.hi{right:0;top:2px;color:var(--up);text-align:right}
+  .range .cap.mid{top:42px;color:var(--dim);transform:translateX(-50%)}
+  .posgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;
+    margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+  .posgrid div span{display:block}
+  .posgrid .lab{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em}
+  .posgrid .val{font:600 15px/1.3 var(--mono);margin-top:3px}
+
+  .seg{display:inline-flex;gap:2px;background:var(--panel-2);border:1px solid var(--line);
+    border-radius:6px;padding:2px}
+  .seg button{font:600 10px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;
+    color:var(--dim);background:none;border:0;border-radius:4px;padding:5px 8px;cursor:pointer}
+  .seg button:hover{color:var(--fg)}
+  .seg button[aria-pressed="true"]{background:var(--panel);color:var(--fg)}
+  .seg button:focus-visible{outline:2px solid var(--link);outline-offset:1px}
+  .h2right{display:flex;align-items:center;gap:10px;min-width:0}
+
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--dim);
+    font-family:var(--mono);margin-bottom:10px}
+  .legend i{display:inline-block;width:11px;height:2px;vertical-align:middle;
+    margin-right:5px;border-radius:1px}
+
+  .empty{padding:26px 14px;text-align:center;color:var(--faint);font-size:13px}
+  .err{margin-bottom:14px;padding:10px 13px;border-radius:8px;font-size:13px;
+    border:1px solid color-mix(in srgb,var(--down) 45%,transparent);
+    background:color-mix(in srgb,var(--down) 10%,transparent);color:var(--down)}
+  .hidden{display:none}
+  svg .gl{stroke:var(--line);stroke-width:1}
+  svg .lbl{fill:var(--faint);font-size:10px;font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <h1>Binance Trade Bot</h1>
+      <span class="tag net" id="netTag">&mdash;</span>
+      <span class="tag" id="stratTag">&mdash;</span>
+    </div>
+    <div class="controls">
+      <span><span class="dot" id="liveDot"></span><span id="lastUpd">connecting&hellip;</span></span>
+      <button id="refreshBtn" type="button">Refresh</button>
+      <button id="pauseBtn" type="button">Pause</button>
+    </div>
+  </header>
+
+  <div id="err" class="err hidden"></div>
+
+  <div class="stats">
+    <div class="stat"><div class="k">Holding</div><div class="v" id="sCoin">&mdash;</div>
+      <div class="s" id="sCoinSince">&nbsp;</div></div>
+    <div class="stat"><div class="k">Portfolio (USD)</div><div class="v" id="sUsd">&mdash;</div>
+      <div class="s" id="sUsdChg">&nbsp;</div></div>
+    <div class="stat"><div class="k">Portfolio (BTC)</div><div class="v" id="sBtc">&mdash;</div>
+      <div class="s" id="sBtcChg">&nbsp;</div></div>
+    <div class="stat"><div class="k">Jumps</div><div class="v" id="sTrades">&mdash;</div>
+      <div class="s" id="sTradeLast">&nbsp;</div></div>
+    <div class="stat"><div class="k">Jump threshold</div><div class="v" id="sThresh">&mdash;</div>
+      <div class="s" id="sThreshNote">&nbsp;</div></div>
+    <div class="stat"><div class="k">vs Holding</div><div class="v" id="sEdge">&mdash;</div>
+      <div class="s" id="sEdgeNote">&nbsp;</div></div>
+    <div class="stat"><div class="k">Exit at</div><div class="v" id="sExit">&mdash;</div>
+      <div class="s" id="sExitNote">&nbsp;</div></div>
+  </div>
+
+  <div class="grid">
+
+    <div class="card wide">
+      <h2>Position <span class="note" id="posNote">&nbsp;</span></h2>
+      <div class="body"><div id="posBody"></div></div>
+    </div>
+
+    <div class="card wide">
+      <h2>Open orders
+        <span class="note" id="ooNote">resting on the exchange &mdash; these hold your funds</span>
+      </h2>
+      <div class="body flush"><div class="scroll">
+        <table>
+          <thead><tr>
+            <th>Pair</th><th>Side</th>
+            <th class="num">Filled</th><th class="num">Price</th>
+            <th class="num">Value held</th><th class="num">Age</th>
+            <th>Status</th><th></th>
+          </tr></thead>
+          <tbody id="ooBody"></tbody>
+        </table>
+        <div class="empty hidden" id="ooEmpty">
+          No open orders &mdash; nothing is holding your balance.
+        </div>
+      </div></div>
+    </div>
+
+    <div class="card wide">
+      <h2>Jump Watch
+        <span class="note" id="jwNote">the price each candidate must reach to trigger a jump,
+          assuming your coin holds steady</span>
+      </h2>
+      <div class="body flush"><div class="scroll">
+        <table>
+          <thead><tr>
+            <th>To</th>
+            <th class="num">Current ratio</th>
+            <th class="num">Target ratio</th>
+            <th class="num">Gap</th>
+            <th class="num">Triggers at</th>
+            <th style="width:22%">Progress to trigger</th>
+            <th class="num">Seen</th>
+          </tr></thead>
+          <tbody id="jwBody"></tbody>
+        </table>
+        <div class="empty hidden" id="jwEmpty">
+          No scouting data yet &mdash; the bot writes these rows once it starts scouting.
+        </div>
+      </div></div>
+    </div>
+
+    <div class="card">
+      <h2>Performance
+        <span class="h2right">
+          <span class="note" id="pvNote">&nbsp;</span>
+          <span class="seg" id="pvPeriod" role="group" aria-label="Chart period">
+            <button type="button" data-period="1h">1h</button>
+            <button type="button" data-period="6h">6h</button>
+            <button type="button" data-period="1d">1d</button>
+            <button type="button" data-period="1w">1w</button>
+            <button type="button" data-period="all">All</button>
+          </span>
+        </span>
+      </h2>
+      <div class="body">
+        <div class="legend">
+          <span><i style="background:var(--up)"></i>strategy</span>
+          <span><i style="background:var(--dim)"></i>held instead</span>
+          <span><i style="background:var(--accent)"></i>all BTC</span>
+        </div>
+        <div id="chart"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Ratchet <span class="note">units held each time a coin is re-entered</span></h2>
+      <div class="body flush"><div class="scroll">
+        <table>
+          <thead><tr>
+            <th>Coin</th><th class="num">Units</th>
+            <th class="num">Previous</th><th class="num">Change</th><th class="num">When</th>
+          </tr></thead>
+          <tbody id="rtBody"></tbody>
+        </table>
+        <div class="empty hidden" id="rtEmpty">
+          No re-entries yet &mdash; a row appears each time the bot buys into a coin.
+        </div>
+      </div></div>
+    </div>
+
+    <div class="card">
+      <h2>Holdings</h2>
+      <div class="body flush"><div class="scroll">
+        <table>
+          <thead><tr>
+            <th>Coin</th><th class="num">Balance</th>
+            <th class="num">USD</th><th style="width:28%">Share</th>
+          </tr></thead>
+          <tbody id="hodlBody"></tbody>
+        </table>
+        <div class="empty hidden" id="hodlEmpty">No balance snapshots recorded yet.</div>
+      </div></div>
+    </div>
+
+    <div class="card wide">
+      <h2>Trade history <span class="note" id="thNote">&nbsp;</span></h2>
+      <div class="body flush"><div class="scroll">
+        <table>
+          <thead><tr>
+            <th>Time</th><th>Side</th><th>Coin</th><th class="num">Amount</th>
+            <th class="num">Bridge amount</th><th class="num">Time to fill</th>
+            <th class="num">Slippage</th><th>State</th>
+          </tr></thead>
+          <tbody id="trBody"></tbody>
+        </table>
+        <div class="empty hidden" id="trEmpty">No trades recorded yet.</div>
+      </div></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+"use strict";
+
+var POLL_MS = 5000;
+var FEE_PER_LEG = 0.001;   // 0.1% taker; the API does not expose the live fee
+var timer = null, paused = false, cfg = null;
+var orderArmed = false;   // a Cancel button is waiting for confirmation
+
+// Which slice of history the performance chart shows. Remembered per browser,
+// wrapped because storage can be unavailable or throw in a private window.
+var perfPeriod = "all";
+try {
+  perfPeriod = localStorage.getItem("perfPeriod") || "all";
+} catch (e) { /* storage unavailable; the default is fine */ }
+
+// ---- timestamp handling -------------------------------------------------
+// Trade / ScoutHistory / CurrentCoin store datetime.utcnow() and serialise it
+// as naive ISO. JS reads naive ISO as LOCAL, so it must be pinned to UTC.
+function parseUtc(s){
+  if(!s) return null;
+  var t = String(s);
+  return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(t) ? t : t + "Z");
+}
+// CoinValue stores datetime.now() (LOCAL) and serialises it as naive ISO,
+// which is exactly how JS reads a naive ISO string. No adjustment needed.
+function parseLocal(s){
+  var d = new Date(s);
+  return isNaN(d) ? null : d;
+}
+
+// /api/total_value_history is SUM(balance*price), and SQL SUM skips NULLs, so
+// every asset the bot could not price vanishes from the total:
+//   * the bridge itself  - get_ticker_price("USDTUSDT") is None
+//   * any coin whose BTC pair is delisted - get_ticker_price("<c>BTC") is None
+// That makes the USD total jump when the bridge is spent on a priceable coin,
+// and makes the BTC total collapse when holding a coin with no BTC pair.
+// So rebuild the series here from per-coin balances, valuing the bridge at 1.
+function buildSeries(values, bridge){
+  var byTime = {};
+  Object.keys(values).forEach(function(sym){
+    (values[sym] || []).forEach(function(p){
+      var slot = byTime[p.datetime] || (byTime[p.datetime] =
+        {t:parseLocal(p.datetime), usd:0, btc:0, priced:0, unpriced:0, held:[]});
+      if(p.balance) slot.held.push(sym);
+      if(sym === bridge){
+        slot.usd += p.balance || 0;            // the bridge IS the USD unit
+      }else if(p.usd_value != null){
+        slot.usd += p.usd_value;
+      }
+      if(p.btc_value != null){ slot.btc += p.btc_value; slot.priced++; }
+      else if(p.balance){ slot.unpriced++; }
+    });
+  });
+  return Object.keys(byTime).map(function(k){
+      var p = byTime[k];
+      p.key = p.held.sort().join(",");   // identity of the asset set
+      return p;
+    })
+    .filter(function(p){ return p.t; })
+    .sort(function(a, b){ return a.t - b.t; });
+}
+
+// update_values only writes a row for coins with a non-zero balance, and the
+// bridge has no Coin row at all until the first trade creates one. So the set
+// of assets covered by a snapshot changes over time, and comparing totals
+// across a change measures the accounting, not performance. Walk back only as
+// far as the composition holds steady.
+function comparableBaseline(series){
+  if(series.length < 2) return null;
+  var key = series[series.length - 1].key, i = series.length - 1;
+  while(i > 0 && series[i - 1].key === key) i--;
+  return i < series.length - 1 ? series[i] : null;
+}
+function span(a, b){
+  var m = Math.round((b.getTime() - a.getTime()) / 60000);
+  if(m < 60) return m + "m";
+  if(m < 1440) return (m / 60).toFixed(1) + "h";
+  return (m / 1440).toFixed(1) + "d";
+}
+function ago(d){
+  if(!d) return "—";
+  var s = Math.max(0, (Date.now() - d.getTime()) / 1000);
+  if(s < 60) return Math.floor(s) + "s ago";
+  if(s < 3600) return Math.floor(s / 60) + "m ago";
+  if(s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+function axisStamp(d, withDate){
+  var hm = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  if(!withDate) return hm;
+  return d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + hm;
+}
+function periodMs(p){
+  // Units follow the API: s, h, d, w, and m for MONTHS - there is no minutes
+  // unit, so "30m" would mean thirty months.
+  var m = /^(\d*)([shdwm])$/.exec(p || "");
+  if(!m) return null;
+  var units = {s: 1000, h: 3600000, d: 86400000, w: 604800000, m: 28 * 86400000};
+  return parseFloat(m[1] || 1) * units[m[2]];
+}
+function spanText(ms){
+  var hours = ms / 3600000;
+  if(hours < 1) return Math.round(ms / 60000) + " min";
+  if(hours < 48) return hours.toFixed(1) + " h";
+  return (hours / 24).toFixed(1) + " d";
+}
+function dur(s){
+  if(s === null || s === undefined) return "—";
+  if(s < 90) return num(s, 1) + "s";
+  if(s < 5400) return num(s / 60, 1) + "m";
+  return num(s / 3600, 1) + "h";
+}
+function clock(d){
+  return d ? d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"}) : "—";
+}
+function num(v, dp){
+  if(v === null || v === undefined || isNaN(v)) return "—";
+  return Number(v).toLocaleString(undefined, {minimumFractionDigits:dp, maximumFractionDigits:dp});
+}
+function sig(v){
+  if(v === null || v === undefined || isNaN(v)) return "—";
+  var a = Math.abs(v);
+  return num(v, a >= 1000 ? 2 : a >= 1 ? 4 : a >= 0.001 ? 6 : 8);
+}
+function pct(v){ return (v >= 0 ? "+" : "") + num(v, 3) + "%"; }
+function el(id){ return document.getElementById(id); }
+function esc(s){
+  return String(s).replace(/[&<>"']/g, function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+  });
+}
+
+// ---- jump threshold -----------------------------------------------------
+// Mirrors AutoTrader._get_ratios: a jump fires when the fee-adjusted current
+// ratio beats the stored target ratio. Solved for the ratio gap it needs.
+function thresholdPct(){
+  if(!cfg) return null;
+  var fee = FEE_PER_LEG + FEE_PER_LEG - FEE_PER_LEG * FEE_PER_LEG;  // round trip
+  if(String(cfg.USE_MARGIN).toLowerCase() === "yes"){
+    return ((1 + Number(cfg.SCOUT_MARGIN) / 100) / (1 - fee) - 1) * 100;
+  }
+  return (1 / (1 - fee * Number(cfg.SCOUT_MULTIPLIER)) - 1) * 100;
+}
+
+function fail(msg){
+  var e = el("err");
+  e.textContent = msg;
+  e.classList.remove("hidden");
+  el("liveDot").classList.add("stale");
+}
+
+function getJSON(path){
+  return fetch(path, {cache:"no-store"}).then(function(r){
+    if(!r.ok) throw new Error(path + " → HTTP " + r.status);
+    return r.json();
+  });
+}
+
+// ---- renderers ----------------------------------------------------------
+function renderJumpWatch(scouts){
+  var body = el("jwBody"), empty = el("jwEmpty");
+  // keep only the most recent scout per destination coin
+  var latest = {};
+  scouts.forEach(function(s){
+    var k = s.to_coin.symbol, d = parseUtc(s.datetime);
+    if(!latest[k] || d > latest[k]._d){ s._d = d; latest[k] = s; }
+  });
+  var rows = Object.keys(latest).map(function(k){ return latest[k]; });
+  var need = thresholdPct();
+
+  rows.forEach(function(r){
+    r._gap = r.target_ratio ? (r.current_ratio / r.target_ratio - 1) * 100 : NaN;
+
+    // A jump fires once current_ratio clears target_ratio by the threshold.
+    // current_ratio is (our price / their price), so with our price held fixed
+    // the candidate has to fall to this level. Not a forecast - just the level
+    // restated as a price, since a ratio is hard to watch a market against.
+    r._trigger = null;
+    if(need !== null && r.target_ratio && r.current_coin_price){
+      r._trigger = r.current_coin_price / (r.target_ratio * (1 + need / 100));
+    }
+  });
+  rows.sort(function(a, b){ return (b._gap || -1e9) - (a._gap || -1e9); });
+
+  empty.classList.toggle("hidden", rows.length > 0);
+
+  // The other end of the trade. A jump out of the held coin fires when
+  // held/candidate clears the stored ratio by the threshold, so for each
+  // candidate there is a price of the HELD coin that triggers it. The first
+  // one reached is the exit. Same caveat as the column: it assumes the other
+  // side holds still, and the others falling would do just as well.
+  var exit = null;
+  rows.forEach(function(r){
+    if(need === null || !r.target_ratio || !r.other_coin_price) return;
+    var trigger = (1 + need / 100) * r.target_ratio * r.other_coin_price;
+    if(exit === null || trigger < exit.price) exit = {price: trigger, to: r.to_coin.symbol, at: r.current_coin_price};
+  });
+
+  var eEl = el("sExit"), eNote = el("sExitNote");
+  if(exit){
+    var move = (exit.price / exit.at - 1) * 100;
+    eEl.textContent = sig(exit.price);
+    eEl.className = "v";
+    eNote.textContent = pct(move) + " from " + sig(exit.at) + " → " + exit.to;
+  }else{
+    eEl.textContent = "—";
+    eNote.textContent = "no exit priced yet";
+  }
+
+  body.innerHTML = rows.map(function(r){
+    var frac = (need && need > 0) ? Math.max(0, Math.min(1, r._gap / need)) : 0;
+    var cls  = (need !== null && r._gap >= need) ? "go" : (frac > 0.6 ? "close" : "");
+    return "<tr>"
+      + '<td class="coin">' + esc(r.to_coin.symbol) + "</td>"
+      + '<td class="num">' + sig(r.current_ratio) + "</td>"
+      + '<td class="num">' + sig(r.target_ratio) + "</td>"
+      + '<td class="num ' + (r._gap >= 0 ? "up" : "down") + '">' + pct(r._gap) + "</td>"
+      + '<td class="num">' + (
+          (need !== null && r._gap >= need)
+            ? '<span class="up">firing now</span>'
+            : (r._trigger === null ? "—"
+               : '<span class="dimtxt">&le;</span> ' + sig(r._trigger)))
+      + "</td>"
+      + '<td><div class="bar"><i class="' + cls + '" style="width:'
+      + (frac * 100).toFixed(1) + '%"></i></div></td>'
+      + '<td class="num dimtxt">' + ago(r._d) + "</td>"
+      + "</tr>";
+  }).join("");
+}
+
+function renderOrders(orders){
+  var body = el("ooBody"), empty = el("ooEmpty"), note = el("ooNote");
+
+  // Don't repaint mid-confirmation, or the 5s poll would reset the button
+  // just as someone is reaching for it.
+  if(orderArmed) return;
+
+  if(orders && orders.error){
+    empty.textContent = orders.error;
+    empty.classList.remove("hidden");
+    body.innerHTML = "";
+    note.textContent = "";
+    return;
+  }
+
+  orders = orders || [];
+  empty.textContent = "No open orders \u2014 nothing is holding your balance.";
+  empty.classList.toggle("hidden", orders.length > 0);
+
+  var held = orders.reduce(function(a, o){
+    return a + (o.quantity - o.filled) * o.price;
+  }, 0);
+  note.textContent = orders.length
+    ? num(held, 2) + " held in " + orders.length + " order" + (orders.length > 1 ? "s" : "")
+    : "resting on the exchange \u2014 these hold your funds";
+
+  body.innerHTML = orders.map(function(o){
+    var pctFilled = o.quantity ? (o.filled / o.quantity * 100) : 0;
+    return "<tr>"
+      + '<td class="coin">' + esc(o.symbol) + "</td>"
+      + '<td><span class="pill ' + (o.side === "SELL" ? "sell" : "buy") + '">'
+      + esc(o.side) + "</span></td>"
+      + '<td class="num">' + sig(o.filled) + ' <span class="dimtxt">/ ' + sig(o.quantity)
+      + " (" + num(pctFilled, 1) + "%)</span></td>"
+      + '<td class="num">' + sig(o.price) + "</td>"
+      + '<td class="num">' + num((o.quantity - o.filled) * o.price, 2) + "</td>"
+      + '<td class="num dimtxt">' + ago(new Date(o.time)) + "</td>"
+      + '<td class="dimtxt">' + esc(o.status) + "</td>"
+      + '<td style="text-align:right">'
+      + '<button class="btn" type="button" data-cancel="' + o.order_id
+      + '" data-symbol="' + esc(o.symbol) + '">Cancel</button>'
+      + "</td></tr>";
+  }).join("");
+}
+
+function renderHoldings(valueHistory, bridge){
+  var body = el("hodlBody"), empty = el("hodlEmpty");
+  var rows = [];
+  Object.keys(valueHistory).forEach(function(sym){
+    var pts = valueHistory[sym];
+    if(!pts || !pts.length) return;
+    var last = pts[pts.length - 1];
+    if(!last.balance) return;
+    // the bridge has no <bridge><bridge> ticker, so usd_value is always null
+    var usd = (sym === bridge) ? last.balance : (last.usd_value || 0);
+    rows.push({sym:sym, bal:last.balance, usd:usd});
+  });
+  var total = rows.reduce(function(a, r){ return a + r.usd; }, 0);
+  rows.sort(function(a, b){ return b.usd - a.usd; });
+
+  empty.classList.toggle("hidden", rows.length > 0);
+  body.innerHTML = rows.map(function(r){
+    var share = total > 0 ? (r.usd / total * 100) : 0;
+    return "<tr>"
+      + '<td class="coin">' + esc(r.sym) + "</td>"
+      + '<td class="num">' + sig(r.bal) + "</td>"
+      + '<td class="num">' + num(r.usd, 2) + "</td>"
+      + '<td><div class="bar"><i style="width:' + share.toFixed(1) + '%"></i></div></td>'
+      + "</tr>";
+  }).join("");
+}
+
+function renderTrades(trades){
+  var body = el("trBody"), empty = el("trEmpty");
+  var rows = trades.slice().sort(function(a, b){ return b.id - a.id; });
+  empty.classList.toggle("hidden", rows.length > 0);
+  // How much worse than the decision price we actually transacted at. A buy
+  // filling above the decision price costs money; a sell filling below does.
+  function slippagePct(t){
+    if(!t.decision_price || !t.fill_price) return null;
+    var raw = (t.fill_price / t.decision_price - 1) * 100;
+    return t.selling ? -raw : raw;
+  }
+
+  var filled = rows.filter(function(t){ return t.seconds_to_fill != null; });
+  var times = filled.map(function(t){ return t.seconds_to_fill; }).sort(function(a, b){ return a - b; });
+  var settled = rows.filter(function(t){ return t.state === "COMPLETE" || t.state === "CANCELED"; });
+  var done = settled.filter(function(t){ return t.state === "COMPLETE"; });
+
+  var summary = [];
+  if(times.length) summary.push("median fill " + dur(times[Math.floor(times.length / 2)]));
+  if(settled.length) summary.push(num(done.length / settled.length * 100, 0) + "% of orders filled");
+  el("thNote").textContent = summary.join(" · ");
+
+  body.innerHTML = rows.map(function(t){
+    var d = parseUtc(t.datetime);
+    var slip = slippagePct(t);
+    return "<tr>"
+      + '<td class="dimtxt">' + clock(d) + " <span class=\"dimtxt\">(" + ago(d) + ")</span></td>"
+      + '<td><span class="pill ' + (t.selling ? "sell" : "buy") + '">'
+      + (t.selling ? "SELL" : "BUY") + "</span></td>"
+      + '<td class="coin">' + esc(t.alt_coin.symbol) + "</td>"
+      + '<td class="num">' + sig(t.alt_trade_amount) + "</td>"
+      + '<td class="num">' + sig(t.crypto_trade_amount) + " "
+      + '<span class="dimtxt">' + esc(t.crypto_coin.symbol) + "</span></td>"
+      + '<td class="num ' + (t.seconds_to_fill > 300 ? "down" : "dimtxt") + '">'
+      + dur(t.seconds_to_fill) + "</td>"
+      + '<td class="num ' + (slip === null ? "dimtxt" : (slip <= 0 ? "up" : "down")) + '">'
+      + (slip === null ? "—" : pct(slip)) + "</td>"
+      + "<td>" + (t.state === "COMPLETE"
+          ? '<span class="up">COMPLETE</span>'
+          : '<span class="dimtxt">' + esc(t.state) + "</span>") + "</td>"
+      + "</tr>";
+  }).join("");
+}
+
+function renderPerformance(perf){
+  var host = el("chart"), note = el("pvNote");
+  var rows = (perf && perf.series) || [];
+
+  var pts = rows.map(function(r){
+    return {t: parseUtc(r.datetime), me: r.total_usdt, hodl: r.bench_hodl, btc: r.bench_btc};
+  }).filter(function(p){ return p.t && p.me != null; });
+
+  if(pts.length < 2){
+    host.innerHTML = '<div class="empty">Not enough samples yet &mdash; one is taken each minute.</div>';
+    note.textContent = "";
+    return;
+  }
+
+  // Index every line to 100 at the anchor. Absolute values are not comparable
+  // across a strategy and its benchmarks; relative shape is the whole point.
+  var base = {me: pts[0].me, hodl: pts[0].hodl, btc: pts[0].btc};
+  function idx(p, k){ return (base[k] && p[k] != null) ? p[k] / base[k] * 100 : null; }
+
+  // Samples arrive about every 107s, but the bot is not always running. A
+  // straight line across an hours-long outage reads as a gradual trend that
+  // was never observed, so anything far outside the usual cadence breaks the
+  // path instead.
+  var deltas = [];
+  for(var g = 1; g < pts.length; g++) deltas.push(pts[g].t - pts[g - 1].t);
+  var sortedDeltas = deltas.slice().sort(function(a, b){ return a - b; });
+  var median = sortedDeltas.length ? sortedDeltas[Math.floor(sortedDeltas.length / 2)] : 0;
+  var gapLimit = Math.max(median * 4, 5 * 60000);
+  var gapCount = deltas.filter(function(d){ return d > gapLimit; }).length;
+
+  var keys = ["me", "hodl", "btc"];
+  var colours = {me: "var(--up)", hodl: "var(--dim)", btc: "var(--accent)"};
+  var all = [];
+  keys.forEach(function(k){
+    pts.forEach(function(p){ var v = idx(p, k); if(v != null) all.push(v); });
+  });
+
+  var W = 560, H = 190, PL = 54, PR = 12, PT = 12, PB = 24;
+  var lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
+  if(hi === lo){ hi = lo + 1; lo = lo - 1; }
+  var pad = (hi - lo) * 0.15; lo -= pad; hi += pad;
+  // The axis runs from the first sample to right now, not to the last
+  // sample. Ending at the last sample rescales as the bot stops, so a dead
+  // feed keeps looking current; running to now leaves visible empty space
+  // on the right that shows exactly how stale the data is.
+  var t0 = pts[0].t.getTime();
+  var tLast = pts[pts.length - 1].t.getTime();
+  var tEnd = Math.max(tLast, Date.now());
+  var span = Math.max(1, tEnd - t0);
+  var endDate = new Date(tEnd);
+  var multiDay = pts[0].t.toDateString() !== endDate.toDateString();
+
+  function X(p){ return PL + (p.t.getTime() - t0) / span * (W - PL - PR); }
+  function Y(v){ return PT + (1 - (v - lo) / (hi - lo)) * (H - PT - PB); }
+
+  var grid = "";
+  for(var i = 0; i <= 3; i++){
+    var y = PT + i / 3 * (H - PT - PB), val = hi - i / 3 * (hi - lo);
+    grid += '<line class="gl" x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR)
+          + '" y2="' + y.toFixed(1) + '"/>'
+          + '<text class="lbl" x="' + (PL - 7) + '" y="' + (y + 3).toFixed(1)
+          + '" text-anchor="end">' + num(val, 1) + "</text>";
+  }
+
+  var paths = keys.map(function(k){
+    var d = "", started = false;
+    pts.forEach(function(p, i){
+      var v = idx(p, k);
+      if(v == null){ started = false; return; }
+      var afterGap = i > 0 && (p.t - pts[i - 1].t) > gapLimit;
+      d += ((started && !afterGap) ? "L" : "M") + X(p).toFixed(1) + " " + Y(v).toFixed(1) + " ";
+      started = true;
+    });
+    if(!started) return "";
+    return '<path d="' + d.trim() + '" fill="none" stroke="' + colours[k]
+         + '" stroke-width="' + (k === "me" ? 2 : 1.2) + '" stroke-linejoin="round"'
+         + (k === "me" ? "" : ' stroke-dasharray="3 3"') + "/>";
+  }).join("");
+
+  host.innerHTML = '<svg viewBox="0 0 ' + W + " " + H + '" width="100%" '
+    + 'preserveAspectRatio="xMidYMid meet" role="img" '
+    + 'aria-label="Strategy value against benchmarks, indexed to 100">'
+    + grid + paths
+    + '<text class="lbl" x="' + PL + '" y="' + (H - 7) + '">' + axisStamp(pts[0].t, multiDay) + "</text>"
+    + '<text class="lbl" x="' + (W - PR) + '" y="' + (H - 7) + '" text-anchor="end">'
+    + axisStamp(endDate, multiDay) + "</text></svg>";
+
+  // Say how long the window really is: time-of-day alone made a 24-hour span
+  // read as twelve minutes.
+  var summary = pts.length + " samples \u00b7 " + spanText(span);
+  if(gapCount) summary += " \u00b7 " + gapCount + " gap" + (gapCount > 1 ? "s" : "");
+  // Indexing is relative to the first point on screen, so the reading is
+  // always \"performance over the window shown\", not since inception.
+  if(perfPeriod !== "all"){
+    summary += " \u00b7 last " + perfPeriod;
+    // Two windows can return an identical chart simply because nothing was
+    // recorded in between. Say so, or the control looks broken.
+    var want = periodMs(perfPeriod);
+    if(want && span < want * 0.9) summary += " (only " + spanText(span) + " recorded)";
+  }
+    var stale = Date.now() - tLast;
+  if(stale > gapLimit) summary += " \u00b7 last sample " + dur(stale / 1000) + " ago";
+note.textContent = summary;
+
+  var last = pts[pts.length - 1];
+  var edge = el("sEdge"), edgeNote = el("sEdgeNote");
+  if(last.hodl){
+    var d = (last.me / last.hodl - 1) * 100;
+    edge.textContent = pct(d);
+    edge.className = "v " + (d >= 0 ? "up" : "down");
+    edgeNote.textContent = "against never having traded";
+  }else{
+    edge.textContent = "—";
+    edgeNote.textContent = "waiting for a benchmark";
+  }
+}
+
+function renderPosition(coinHistory, held, price){
+  var host = el("posBody"), note = el("posNote");
+  var pos = null;
+
+  (coinHistory || []).forEach(function(p){
+    if(!pos || parseUtc(p.datetime) > parseUtc(pos.datetime)) pos = p;
+  });
+
+  if(!pos){
+    host.innerHTML = '<div class="empty">No position recorded yet.</div>';
+    note.textContent = "";
+    return;
+  }
+
+  var symbol = pos.coin ? pos.coin.symbol : (held && held.symbol) || "?";
+  note.textContent = symbol + " \u00b7 opened " + ago(parseUtc(pos.datetime));
+
+  var entry = pos.entry_price, stop = pos.stop_loss, target = pos.take_profit;
+
+  if(!stop && !target){
+    host.innerHTML = '<div class="empty">'
+      + "Stop-loss and take-profit are off. Set <code>stop_loss</code> and "
+      + "<code>take_profit</code> in user.cfg, then reopen a position \u2014 "
+      + "levels are fixed at entry and are not applied retroactively."
+      + "</div>";
+    return;
+  }
+
+  // Draw the band the position lives in. Without one of the two levels the
+  // band is open-ended, so fall back to a symmetric distance from entry to
+  // keep the marker meaningful rather than pinned to an edge.
+  var span = entry ? Math.abs((target || entry) - (stop || entry)) || entry * 0.1 : 1;
+  var lo = stop || (entry ? entry - span : 0);
+  var hi = target || (entry ? entry + span : 1);
+  function place(v){
+    if(v == null || hi === lo) return null;
+    return Math.max(0, Math.min(100, (v - lo) / (hi - lo) * 100));
+  }
+
+  var atNow = place(price), atEntry = place(entry);
+  var toStop = (price && stop) ? (stop / price - 1) * 100 : null;
+  var toTarget = (price && target) ? (target / price - 1) * 100 : null;
+  var pnl = (price && entry) ? (price / entry - 1) * 100 : null;
+
+  var fillColour = pnl == null ? "var(--dim)" : (pnl >= 0 ? "var(--up)" : "var(--down)");
+
+  host.innerHTML =
+      '<div class="range">'
+    +   '<span class="cap lo">' + (stop ? "stop " + sig(stop) : "no stop") + "</span>"
+    +   '<span class="cap hi">' + (target ? "target " + sig(target) : "no target") + "</span>"
+    +   '<div class="track">'
+    +     (atNow == null ? "" : '<i style="width:' + atNow.toFixed(1) + '%;background:' + fillColour + '"></i>')
+    +   "</div>"
+    +   (atEntry == null ? "" : '<div class="tick" style="left:' + atEntry.toFixed(1) + '%"></div>')
+    +   (atNow == null ? "" : '<div class="now" style="left:' + atNow.toFixed(1) + '%"></div>')
+    +   (atNow == null ? "" : '<span class="cap mid" style="left:' + atNow.toFixed(1) + '%">'
+          + sig(price) + "</span>")
+    + "</div>"
+    + '<div class="posgrid">'
+    +   '<div><span class="lab">Entry</span><span class="val">' + (entry ? sig(entry) : "—") + "</span></div>"
+    +   '<div><span class="lab">Now</span><span class="val">' + (price ? sig(price) : "—") + "</span></div>"
+    +   '<div><span class="lab">Unrealised</span><span class="val ' + (pnl == null ? "" : (pnl >= 0 ? "up" : "down"))
+    +     '">' + (pnl == null ? "—" : pct(pnl)) + "</span></div>"
+    +   '<div><span class="lab">To stop</span><span class="val down">'
+    +     (toStop == null ? "—" : pct(toStop)) + "</span></div>"
+    +   '<div><span class="lab">To target</span><span class="val up">'
+    +     (toTarget == null ? "—" : pct(toTarget)) + "</span></div>"
+    + "</div>";
+}
+
+function renderRatchet(entries){
+  var body = el("rtBody"), empty = el("rtEmpty");
+  entries = entries || [];
+  empty.classList.toggle("hidden", entries.length > 0);
+  body.innerHTML = entries.map(function(e){
+    var change = e.ratio == null ? null : (e.ratio - 1) * 100;
+    return "<tr>"
+      + '<td class="coin">' + esc(e.coin ? e.coin.symbol : "?") + "</td>"
+      + '<td class="num">' + sig(e.units) + "</td>"
+      + '<td class="num dimtxt">' + (e.previous_units == null ? "first" : sig(e.previous_units)) + "</td>"
+      + '<td class="num ' + (change == null ? "dimtxt" : (change >= 0 ? "up" : "down")) + '">'
+      + (change == null ? "—" : pct(change)) + "</td>"
+      + '<td class="num dimtxt">' + ago(parseUtc(e.datetime)) + "</td>"
+      + "</tr>";
+  }).join("");
+}
+
+function renderStats(current, trades, series, coinHistory){
+  el("sCoin").textContent = current && current.symbol ? current.symbol : "—";
+
+  if(coinHistory && coinHistory.length){
+    var newestHold = coinHistory.reduce(function(a, b){
+      return parseUtc(a.datetime) > parseUtc(b.datetime) ? a : b;
+    });
+    el("sCoinSince").textContent = "held for " + ago(parseUtc(newestHold.datetime)).replace(" ago", "");
+  }
+
+  var last = series.length ? series[series.length - 1] : null;
+  el("sUsd").textContent = last ? num(last.usd, 2) : "—";
+  el("sBtc").textContent = last ? num(last.btc, 8) : "—";
+
+  var base = comparableBaseline(series), eu = el("sUsdChg");
+  if(base && base.usd){
+    var du = (last.usd - base.usd) / base.usd * 100;
+    eu.textContent = pct(du) + " over " + span(base.t, last.t);
+    eu.className = "s " + (du >= 0 ? "up" : "down");
+  }else{
+    eu.textContent = "holdings just changed — no baseline";
+    eu.className = "s";
+  }
+  // Never present the BTC figure as a return: coins with a delisted BTC pair
+  // have no btc_price at all, so the total covers only part of the portfolio.
+  var eb = el("sBtcChg");
+  if(last && last.unpriced){
+    eb.textContent = last.priced + " of " + (last.priced + last.unpriced)
+                   + " coins priced in BTC";
+    eb.className = "s";
+  }else if(base && last && base.btc){
+    var db = (last.btc - base.btc) / base.btc * 100;
+    eb.textContent = pct(db) + " over " + span(base.t, last.t);
+    eb.className = "s " + (db >= 0 ? "up" : "down");
+  }
+
+  el("sTrades").textContent = trades.length;
+  if(trades.length){
+    var newest = trades.reduce(function(a, b){ return a.id > b.id ? a : b; });
+    el("sTradeLast").textContent = "last " + ago(parseUtc(newest.datetime));
+  }
+
+  var need = thresholdPct();
+  el("sThresh").textContent = need === null ? "—" : "+" + num(need, 3) + "%";
+  if(cfg){
+    el("sThreshNote").textContent = String(cfg.USE_MARGIN).toLowerCase() === "yes"
+      ? "margin " + cfg.SCOUT_MARGIN + "%, fee assumed " + (FEE_PER_LEG * 100) + "%/leg"
+      : "multiplier " + cfg.SCOUT_MULTIPLIER + ", fee assumed " + (FEE_PER_LEG * 100) + "%/leg";
+  }
+}
+
+// ---- refresh loop -------------------------------------------------------
+function refresh(){
+  return Promise.all([
+    getJSON("/api/current_coin"),
+    getJSON("/api/trade_history"),
+    getJSON("/api/scouting_history"),
+    getJSON("/api/value_history"),
+    getJSON("/api/current_coin_history"),
+    getJSON("/api/open_orders").catch(function(e){ return {error: String(e.message || e)}; }),
+    getJSON("/api/performance" + (perfPeriod === "all" ? "" : "?period=" + perfPeriod))
+      .catch(function(){ return {series: []}; }),
+    getJSON("/api/ratchet").catch(function(){ return []; })
+  ]).then(function(res){
+    var current = res[0], trades = res[1], scouts = res[2],
+        values  = res[3], coinHistory = res[4], orders = res[5],
+        perf    = res[6], ratchet = res[7];
+    var series  = buildSeries(values || {}, cfg ? cfg.BRIDGE_SYMBOL : null);
+
+    el("err").classList.add("hidden");
+    el("liveDot").classList.remove("stale");
+
+    var heldPrice = null;
+    (scouts || []).forEach(function(s){
+      if(heldPrice === null || s.datetime > heldPrice.datetime) heldPrice = s;
+    });
+    renderPosition(coinHistory, current, heldPrice && heldPrice.current_coin_price);
+    renderOrders(orders);
+    renderStats(current, trades || [], series, coinHistory || []);
+    renderJumpWatch(scouts || []);
+    renderHoldings(values || {}, cfg ? cfg.BRIDGE_SYMBOL : null);
+    renderTrades(trades || []);
+    renderPerformance(perf);
+    renderRatchet(ratchet);
+
+    el("lastUpd").textContent = "updated " + clock(new Date());
+  }).catch(function(e){
+    fail(String(e.message || e));
+  });
+}
+
+function schedule(){
+  clearInterval(timer);
+  if(!paused) timer = setInterval(refresh, POLL_MS);
+}
+
+function disarm(btn){
+  clearTimeout(btn._armTimer);
+  btn.classList.remove("armed");
+  btn.textContent = "Cancel";
+  orderArmed = false;
+}
+
+el("ooBody").addEventListener("click", function(ev){
+  var btn = ev.target.closest("button[data-cancel]");
+  if(!btn) return;
+
+  var id = btn.getAttribute("data-cancel");
+  var symbol = btn.getAttribute("data-symbol");
+
+  if(!btn.classList.contains("armed")){
+    // first click arms, second confirms - cancelling is not undoable
+    btn.classList.add("armed");
+    btn.textContent = "Confirm";
+    orderArmed = true;
+    btn._armTimer = setTimeout(function(){ disarm(btn); }, 5000);
+    return;
+  }
+
+  clearTimeout(btn._armTimer);
+  btn.disabled = true;
+  btn.textContent = "Cancelling";
+
+  fetch("/api/open_orders/" + id + "/cancel", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({symbol: symbol})
+  }).then(function(r){
+    return r.json().then(function(j){ return {ok: r.ok, data: j}; });
+  }).then(function(res){
+    if(!res.ok) throw new Error(res.data.error || "the request was refused");
+    orderArmed = false;
+    return refresh();
+  }).catch(function(e){
+    fail("Couldn't cancel order " + id + ": " + e.message);
+    btn.disabled = false;
+    disarm(btn);
+  });
+});
+
+function markPeriod(){
+  var buttons = el("pvPeriod").querySelectorAll("button[data-period]");
+  Array.prototype.forEach.call(buttons, function(b){
+    b.setAttribute("aria-pressed", b.getAttribute("data-period") === perfPeriod ? "true" : "false");
+  });
+}
+
+el("pvPeriod").addEventListener("click", function(ev){
+  var btn = ev.target.closest("button[data-period]");
+  if(!btn) return;
+  perfPeriod = btn.getAttribute("data-period");
+  try { localStorage.setItem("perfPeriod", perfPeriod); } catch (e) { /* fine */ }
+  markPeriod();
+  refresh();
+});
+markPeriod();
+
+el("refreshBtn").addEventListener("click", refresh);
+el("pauseBtn").addEventListener("click", function(){
+  paused = !paused;
+  this.textContent = paused ? "Resume" : "Pause";
+  el("lastUpd").textContent = paused ? "paused" : "resuming…";
+  schedule();
+  if(!paused) refresh();
+});
+
+getJSON("/api/config").then(function(c){
+  cfg = c;
+  el("netTag").textContent = c.TESTNET ? "TESTNET" : "LIVE — REAL FUNDS";
+  el("stratTag").textContent = String(c.STRATEGY || "?") + " · " + String(c.BRIDGE_SYMBOL || "?");
+}).catch(function(){
+  el("netTag").textContent = "config unavailable";
+}).then(function(){
+  refresh();
+  schedule();
+});
+</script>
+</body>
+</html>
