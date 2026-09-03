@@ -16,7 +16,7 @@
 pip install -r requirements.txt
 ```
 
-`dev-requirements.txt` adds `pre-commit` for contributors only.
+`dev-requirements.txt` adds `pylint-sqlalchemy`, used only for linting.
 
 ## Binance account
 
