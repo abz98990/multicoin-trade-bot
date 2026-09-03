@@ -18,7 +18,7 @@ That starts the bot and the dashboard together and opens
 | Guide | |
 |---|---|
 | [requirements.md](requirements.md) | Prerequisites and the full `user.cfg` reference |
-| [deployment.md](deployment.md) | Local, Docker, ports, going live |
+| [deployment.md](deployment.md) | Local environment setup, running, going live |
 | [runbook.md](runbook.md) | Daily operation, troubleshooting, known limits |
 
 ## The idea

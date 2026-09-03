@@ -8,9 +8,10 @@
 | OS | Windows, macOS, Linux |
 | Disk | ~50 MB (the SQLite database grows ~30 MB/year) |
 
-> `runtime.txt` says `python-3.8.11` and the Dockerfile builder stage is
-> `python:3.8`. Both are stale — `eventlet==0.41.2` and `dnspython==2.8.0`
-> declare `>=3.10`, so a 3.8 build fails at `pip install`. See `deployment.md`.
+> `runtime.txt` (`python-3.8.11`) and `Dockerfile` (`python:3.8`) are stale
+> leftovers from upstream — `eventlet==0.41.2` and `dnspython==2.8.0` declare
+> `>=3.10`, so anything built on 3.8 fails at `pip install`. Neither file is
+> used by the local setup in `deployment.md`.
 
 ```bash
 pip install -r requirements.txt
