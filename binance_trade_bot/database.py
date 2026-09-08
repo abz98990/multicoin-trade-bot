@@ -145,6 +145,102 @@ class Database:
             info = position.info()
             return info
 
+    def get_open_positions(self):
+        """
+        The most recent current_coin_history row for every coin that has one,
+        keyed by symbol.
+
+        get_current_position() answers "what is the bot's own rotation seat
+        right now", which is one coin. This answers "what risk levels, if any,
+        does each coin I have ever held carry" - the dashboard cross-references
+        it against live balances to show every coin actually worth protecting,
+        not just the bot's single seat. A coin sold back to zero and later
+        re-bought still resolves to its latest row, so editing survives a round
+        trip through the bridge.
+        """
+        session: Session
+        with self.db_session() as session:
+            rows = session.query(CurrentCoin).order_by(CurrentCoin.datetime.asc()).all()
+            latest = {}
+            for row in rows:
+                latest[row.coin_id] = row.info()  # later rows overwrite earlier ones
+            return latest
+
+    def set_position_risk(
+        self,
+        coin: Union[Coin, str],
+        stop_loss: float = None,
+        take_profit: float = None,
+        fallback_entry_price: float = None,
+    ):
+        """
+        Create or update a coin's stop-loss/take-profit in place.
+
+        This is the "edit on the go" path: unlike set_current_coin, it does not
+        insert a new current_coin_history row when one already exists for this
+        coin - it mutates the existing row's levels, so "opened X ago" keeps
+        reading from the real entry instead of resetting to "just now" every
+        time someone adjusts a percentage. If the coin has never had a row at
+        all (e.g. the bot acquired it before this feature existed), one is
+        created using fallback_entry_price - usually the live price - as an
+        informational entry, since the true cost basis is not recoverable.
+
+        Levels are passed as absolute prices, already computed by the caller
+        from whatever percentage the user typed and whatever entry price is on
+        record - this method only ever needs to know where to write them.
+        """
+        coin = self.get_coin(coin)
+        symbol = coin.symbol if isinstance(coin, Coin) else str(coin)
+
+        session: Session
+        with self.db_session() as session:
+            row: CurrentCoin = (
+                session.query(CurrentCoin)
+                .filter(CurrentCoin.coin_id == symbol)
+                .order_by(CurrentCoin.datetime.desc())
+                .first()
+            )
+            if row is None:
+                if fallback_entry_price is None:
+                    return None
+                merged = session.merge(coin) if isinstance(coin, Coin) else coin
+                row = CurrentCoin(merged, fallback_entry_price, stop_loss, take_profit)
+                session.add(row)
+                old_stop, old_target = None, None
+            else:
+                old_stop, old_target = row.stop_loss, row.take_profit
+                row.stop_loss = stop_loss
+                row.take_profit = take_profit
+            session.flush()
+            self.send_update(row)
+            info = row.info()
+
+        def fmt(value):
+            return "none" if value is None else f"{value:.8g}"
+
+        self.log_event(
+            "risk",
+            f"{symbol} risk levels changed: stop {fmt(old_stop)} → {fmt(stop_loss)}, "
+            f"target {fmt(old_target)} → {fmt(take_profit)}",
+        )
+        return info
+
+    def log_event(self, category: str, message: str):
+        """
+        Record a decision or change for the dashboard's activity log.
+
+        For decisions and changes only - jumps, risk edits, stop/target hits,
+        manual trades. Not every scout tick; a price check that decides nothing
+        is not an event, and logging one per second would drown the entries
+        that actually matter within minutes.
+        """
+        session: Session
+        with self.db_session() as session:
+            entry = ActivityLog(category, message)
+            session.add(entry)
+            session.flush()
+            self.send_update(entry)
+
     def start_cooldown(self, coin: Union[Coin, str], minutes: float):
         """Keep a coin out of consideration after it stopped out."""
         if not minutes:

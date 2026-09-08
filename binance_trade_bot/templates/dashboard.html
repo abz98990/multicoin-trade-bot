@@ -50,6 +50,14 @@
   .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;
     overflow:hidden;display:flex;flex-direction:column}
   .card.wide{grid-column:1/-1}
+  /* A firm 50/50 pair, independent of how many columns auto-fit gives the rest
+     of the grid - explicit rather than relying on two cards happening to be
+     the only ones sharing a row. Below ~1000px there isn't room for two
+     comfortable halves, so it drops back to one column. */
+  .split{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:1000px){
+    .split{grid-template-columns:1fr}
+  }
   .card h2{font-size:12px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line);
     color:var(--dim);text-transform:uppercase;letter-spacing:.06em;font-weight:600;
     display:flex;justify-content:space-between;align-items:center;gap:10px}
@@ -80,6 +88,9 @@
     border:1px solid var(--line);color:var(--dim)}
   .pill.buy{color:var(--up);border-color:color-mix(in srgb,var(--up) 45%,transparent)}
   .pill.sell{color:var(--down);border-color:color-mix(in srgb,var(--down) 45%,transparent)}
+  .pill.jump{color:var(--link);border-color:color-mix(in srgb,var(--link) 45%,transparent)}
+  .pill.risk{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+  .pill.trade{color:var(--up);border-color:color-mix(in srgb,var(--up) 45%,transparent)}
 
   .btn{font:600 11px/1 var(--mono);letter-spacing:.04em;text-transform:uppercase;
     color:var(--fg);background:var(--panel-2);border:1px solid var(--line);
@@ -88,6 +99,28 @@
   .btn:disabled{opacity:.5;cursor:default}
   .btn.armed{background:var(--down);border-color:var(--down);color:#fff}
   .btn:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+
+  .sellctl,.riskctl{display:inline-flex;align-items:center;gap:4px}
+  .sellctl input.pct,.riskctl input.pct{width:42px;font:600 12px/1 var(--mono);color:var(--fg);
+    background:var(--panel-2);border:1px solid var(--line);border-radius:5px;
+    padding:6px 3px;text-align:right;-moz-appearance:textfield}
+  /* The native up/down spinner reserves its own width inside the input box
+     regardless of how wide the box is declared, which crowded out the "100"
+     default at this size. Typing a value is the normal way to use this field
+     anyway, so the spinner isn't worth the space it costs. */
+  .sellctl input.pct::-webkit-inner-spin-button,.riskctl input.pct::-webkit-inner-spin-button,
+  .sellctl input.pct::-webkit-outer-spin-button,.riskctl input.pct::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+  .sellctl input.pct:disabled,.riskctl input.pct:disabled{opacity:.5}
+  .sellctl input.pct:focus-visible,.riskctl input.pct:focus-visible{outline:2px solid var(--link);outline-offset:1px}
+  .sellctl .unit,.riskctl .unit{font-family:var(--mono);font-size:11px;color:var(--dim)}
+  .sellctl .btn{padding:6px 9px}
+
+  /* Holdings-specific: the row now carries a sell control alongside the usual
+     columns, so it gets its own tighter spacing rather than the defaults
+     tuned for wider, simpler tables like Trade history. */
+  .cozy td,.cozy th{padding-left:8px;padding-right:8px}
+  .cozy td:first-child,.cozy th:first-child{padding-left:14px}
+  .bar-sm{min-width:34px}
 
   .range{position:relative;height:56px;margin:6px 0 2px}
   .range .track{position:absolute;left:0;right:0;top:24px;height:7px;border-radius:4px;
@@ -187,6 +220,23 @@
     </div>
 
     <div class="card wide">
+      <h2>Open positions
+        <span class="note">stop-loss / take-profit for every coin you hold &mdash; edit anytime, applies immediately</span>
+      </h2>
+      <div class="body flush"><div class="scroll">
+        <table class="cozy">
+          <thead><tr>
+            <th>Coin</th><th class="num">Balance</th><th class="num">Price</th>
+            <th class="num">Entry</th><th class="num">Unrealised</th>
+            <th style="width:90px">Stop-loss</th><th style="width:90px">Take-profit</th><th></th>
+          </tr></thead>
+          <tbody id="positionsBody"></tbody>
+        </table>
+        <div class="empty hidden" id="positionsEmpty">Nothing held right now.</div>
+      </div></div>
+    </div>
+
+    <div class="card wide">
       <h2>Manual buy
         <span class="note">opens a position with levels of your own, alongside the bot's own trading</span>
       </h2>
@@ -246,37 +296,46 @@
       </div></div>
     </div>
 
-    <div class="card">
-      <h2>Performance
-        <span class="h2right">
-          <span class="note" id="pvNote">&nbsp;</span>
-          <span class="seg" id="pvPeriod" role="group" aria-label="Chart period">
-            <button type="button" data-period="1h">1h</button>
-            <button type="button" data-period="6h">6h</button>
-            <button type="button" data-period="1d">1d</button>
-            <button type="button" data-period="1w">1w</button>
-            <button type="button" data-period="all">All</button>
+    <div class="split">
+      <div class="card">
+        <h2>Performance
+          <span class="h2right">
+            <span class="note" id="pvNote">&nbsp;</span>
+            <span class="seg" id="pvPeriod" role="group" aria-label="Chart period">
+              <button type="button" data-period="1h">1h</button>
+              <button type="button" data-period="6h">6h</button>
+              <button type="button" data-period="1d">1d</button>
+              <button type="button" data-period="1w">1w</button>
+              <button type="button" data-period="all">All</button>
+            </span>
           </span>
-        </span>
-      </h2>
-      <div class="body">
-        <div class="legend">
-          <span><i style="background:var(--up)"></i>strategy</span>
-          <span><i style="background:var(--dim)"></i>held instead</span>
-          <span><i style="background:var(--accent)"></i>all BTC</span>
+        </h2>
+        <div class="body">
+          <div class="legend">
+            <span><i style="background:var(--up)"></i>strategy</span>
+            <span><i style="background:var(--dim)"></i>held instead</span>
+            <span><i style="background:var(--accent)"></i>all BTC</span>
+          </div>
+          <div id="chart"></div>
         </div>
-        <div id="chart"></div>
       </div>
-    </div>
 
-    <div class="card">
-      <h2>Price history
-        <span class="h2right">
-          <span class="note" id="phNote">&nbsp;</span>
-          <select class="picker" id="phCoin"></select>
-        </span>
-      </h2>
-      <div class="body"><div id="phChart"></div></div>
+      <div class="card">
+        <h2>Price history
+          <span class="h2right">
+            <span class="note" id="phNote">&nbsp;</span>
+            <span class="seg" id="phPeriod" role="group" aria-label="Chart period">
+              <button type="button" data-period="1h">1h</button>
+              <button type="button" data-period="6h">6h</button>
+              <button type="button" data-period="1d">1d</button>
+              <button type="button" data-period="1w">1w</button>
+              <button type="button" data-period="all">All</button>
+            </span>
+            <select class="picker" id="phCoin"></select>
+          </span>
+        </h2>
+        <div class="body"><div id="phChart"></div></div>
+      </div>
     </div>
 
     <div class="card wide">
@@ -296,34 +355,36 @@
       </div></div>
     </div>
 
-    <div class="card">
-      <h2>Ratchet <span class="note">units held each time a coin is re-entered</span></h2>
-      <div class="body flush"><div class="scroll">
-        <table>
-          <thead><tr>
-            <th>Coin</th><th class="num">Units</th>
-            <th class="num">Previous</th><th class="num">Change</th><th class="num">When</th>
-          </tr></thead>
-          <tbody id="rtBody"></tbody>
-        </table>
-        <div class="empty hidden" id="rtEmpty">
-          No re-entries yet &mdash; a row appears each time the bot buys into a coin.
-        </div>
-      </div></div>
-    </div>
+    <div class="split">
+      <div class="card">
+        <h2>Ratchet <span class="note">units held each time a coin is re-entered</span></h2>
+        <div class="body flush"><div class="scroll">
+          <table>
+            <thead><tr>
+              <th>Coin</th><th class="num">Units</th>
+              <th class="num">Previous</th><th class="num">Change</th><th class="num">When</th>
+            </tr></thead>
+            <tbody id="rtBody"></tbody>
+          </table>
+          <div class="empty hidden" id="rtEmpty">
+            No re-entries yet &mdash; a row appears each time the bot buys into a coin.
+          </div>
+        </div></div>
+      </div>
 
-    <div class="card">
-      <h2>Holdings <span class="note">sell any holding into the bridge at market</span></h2>
-      <div class="body flush"><div class="scroll">
-        <table>
-          <thead><tr>
-            <th>Coin</th><th class="num">Balance</th>
-            <th class="num">USD</th><th style="width:22%">Share</th><th></th>
-          </tr></thead>
-          <tbody id="hodlBody"></tbody>
-        </table>
-        <div class="empty hidden" id="hodlEmpty">No balance snapshots recorded yet.</div>
-      </div></div>
+      <div class="card">
+        <h2>Holdings <span class="note">sell any holding into the bridge at market</span></h2>
+        <div class="body flush"><div class="scroll">
+          <table class="cozy">
+            <thead><tr>
+              <th>Coin</th><th class="num">Balance</th>
+              <th class="num">USD</th><th style="width:54px">Share</th><th></th>
+            </tr></thead>
+            <tbody id="hodlBody"></tbody>
+          </table>
+          <div class="empty hidden" id="hodlEmpty">No balance snapshots recorded yet.</div>
+        </div></div>
+      </div>
     </div>
 
     <div class="card wide">
@@ -341,6 +402,19 @@
       </div></div>
     </div>
 
+    <div class="card wide">
+      <h2>Activity log
+        <span class="note">every decision and change &mdash; jumps, risk edits, stop/target hits, manual trades</span>
+      </h2>
+      <div class="body flush"><div class="scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Category</th><th>Message</th></tr></thead>
+          <tbody id="alBody"></tbody>
+        </table>
+        <div class="empty hidden" id="alEmpty">No activity recorded yet.</div>
+      </div></div>
+    </div>
+
   </div>
 </div>
 
@@ -355,6 +429,18 @@ var sellArmed = false;    // a Sell button is waiting for confirmation
 var buyArmed = false;     // the Buy button is waiting for confirmation
 var priceCoin = null;     // which coin the price chart is showing
 var coinsLoaded = false;
+// Risk-level percent fields a user has typed but not yet saved, keyed
+// "<symbol>:stop" / "<symbol>:target" - survives a poll tick so an edit in
+// progress on one field isn't wiped out by the server's view of the other.
+var editedRisk = {};
+
+// Which slice of a coin's price history is shown - independent of perfPeriod,
+// since a strategy question ("last week") and a price question ("just now")
+// are usually different questions.
+var pricePeriod = "all";
+try {
+  pricePeriod = localStorage.getItem("pricePeriod") || "all";
+} catch (e) { /* storage unavailable; the default is fine */ }
 
 // Which slice of history the performance chart shows. Remembered per browser,
 // wrapped because storage can be unavailable or throw in a private window.
@@ -638,8 +724,21 @@ function renderHoldings(valueHistory, bridge){
   var total = rows.reduce(function(a, r){ return a + r.usd; }, 0);
   rows.sort(function(a, b){ return b.usd - a.usd; });
 
-  // Don't repaint while someone is mid-confirmation on a Sell button.
+  // Don't repaint while someone is mid-confirmation on a Sell button, or has
+  // a percent field focused - either would wipe out what they are doing.
   if(sellArmed) return;
+  var focused = document.activeElement;
+  if(focused && focused.classList && focused.classList.contains("pct")) return;
+
+  // A typed percent survives even after the field loses focus: capture any
+  // value the user edited away from the 100 default before the table is
+  // rebuilt, then reapply it to the matching row below. Otherwise a periodic
+  // refresh could silently revert someone's choice before they click Sell.
+  var savedPct = {};
+  body.querySelectorAll("input.pct").forEach(function(inp){
+    var sym = inp.getAttribute("data-pct-for");
+    if(sym && inp.value && inp.value !== "100") savedPct[sym] = inp.value;
+  });
 
   empty.classList.toggle("hidden", rows.length > 0);
   body.innerHTML = rows.map(function(r){
@@ -647,13 +746,83 @@ function renderHoldings(valueHistory, bridge){
     // The bridge is what everything sells into, so it has no Sell action.
     var action = (r.sym === bridge)
       ? '<span class="dimtxt">bridge</span>'
-      : '<button class="btn" type="button" data-sell="' + esc(r.sym) + '">Sell</button>';
+      : '<span class="sellctl">'
+        + '<input class="pct" type="number" min="0.0001" max="100" step="any" '
+        + 'value="' + esc(String(savedPct[r.sym] || "100")) + '" data-pct-for="' + esc(r.sym) + '" '
+        + 'aria-label="Percent of ' + esc(r.sym) + ' to sell"><span class="unit">%</span>'
+        + '<button class="btn" type="button" data-sell="' + esc(r.sym) + '">Sell</button>'
+        + "</span>";
     return "<tr>"
       + '<td class="coin">' + esc(r.sym) + "</td>"
       + '<td class="num">' + sig(r.bal) + "</td>"
       + '<td class="num">' + num(r.usd, 2) + "</td>"
-      + '<td><div class="bar"><i style="width:' + share.toFixed(1) + '%"></i></div></td>'
+      // A linear fill vanishes below ~5% in a portfolio spread across many
+      // small holdings; floor it so any nonzero share still shows a sliver,
+      // without changing the real percentage used for sorting elsewhere.
+      + '<td><div class="bar bar-sm"><i style="width:' + (share > 0 ? Math.max(share, 4) : 0).toFixed(1) + '%"></i></div></td>'
       + '<td style="text-align:right">' + action + "</td>"
+      + "</tr>";
+  }).join("");
+}
+
+function renderPositions(positions){
+  var body = el("positionsBody"), empty = el("positionsEmpty");
+  positions = positions || [];
+  empty.classList.toggle("hidden", positions.length > 0);
+
+  // Same guard as renderHoldings: don't repaint out from under someone
+  // mid-edit, or the cursor jumps and an untyped value could get clobbered.
+  var focused = document.activeElement;
+  if(focused && focused.matches && focused.matches("input[data-risk-for]")) return;
+
+  // entry_price is the true cost basis when known. A coin the bot held
+  // before this feature existed has none on record, so fall back to the
+  // live price - the same reference set_position_risk itself falls back to
+  // when it has to invent one.
+  function stopPct(level, basis){
+    if(!level || !basis) return "";
+    var v = (1 - level / basis) * 100;
+    return v > 0 ? num(v, 2) : "";
+  }
+  function targetPct(level, basis){
+    if(!level || !basis) return "";
+    var v = (level / basis - 1) * 100;
+    return v > 0 ? num(v, 2) : "";
+  }
+
+  body.innerHTML = positions.map(function(p){
+    var basis = p.entry_price || p.price;
+    var stopKey = p.symbol + ":stop", targetKey = p.symbol + ":target";
+    // A field the user already edited this session wins over the server's
+    // value, so leaving it alone and saving doesn't silently discard typing
+    // that just hasn't been sent yet.
+    var stopVal = editedRisk.hasOwnProperty(stopKey) ? editedRisk[stopKey] : stopPct(p.stop_loss, basis);
+    var targetVal = editedRisk.hasOwnProperty(targetKey) ? editedRisk[targetKey] : targetPct(p.take_profit, basis);
+    var pnl = p.unrealized_percent;
+    var entryTitle = p.entry_price ? "" :
+      ' title="No recorded entry — a fresh level is estimated from the live price when you save"';
+
+    return "<tr>"
+      + '<td class="coin">' + esc(p.symbol) + "</td>"
+      + '<td class="num">' + sig(p.balance) + "</td>"
+      + '<td class="num">' + sig(p.price) + "</td>"
+      + '<td class="num"' + entryTitle + '>'
+      +   (p.entry_price ? sig(p.entry_price) : '<span class="dimtxt">none</span>') + "</td>"
+      + '<td class="num ' + (pnl == null ? "dimtxt" : (pnl >= 0 ? "up" : "down")) + '">'
+      +   (pnl == null ? "—" : pct(pnl)) + "</td>"
+      + '<td><span class="riskctl">'
+      +   '<input class="pct" type="number" min="0" step="any" placeholder="none" value="' + esc(stopVal)
+      +   '" data-risk-for="' + esc(p.symbol) + '" data-field="stop" aria-label="Stop-loss percent for ' + esc(p.symbol) + '">'
+      +   '<span class="unit">%</span></span>'
+      +   (p.stop_loss ? '<div class="dimtxt" style="font-size:10px;margin-top:2px">' + sig(p.stop_loss) + '</div>' : '')
+      + '</td>'
+      + '<td><span class="riskctl">'
+      +   '<input class="pct" type="number" min="0" step="any" placeholder="none" value="' + esc(targetVal)
+      +   '" data-risk-for="' + esc(p.symbol) + '" data-field="target" aria-label="Take-profit percent for ' + esc(p.symbol) + '">'
+      +   '<span class="unit">%</span></span>'
+      +   (p.take_profit ? '<div class="dimtxt" style="font-size:10px;margin-top:2px">' + sig(p.take_profit) + '</div>' : '')
+      + '</td>'
+      + '<td style="text-align:right"><button class="btn" type="button" data-risk-save="' + esc(p.symbol) + '">Save</button></td>'
       + "</tr>";
   }).join("");
 }
@@ -698,6 +867,20 @@ function renderTrades(trades){
       + "<td>" + (t.state === "COMPLETE"
           ? '<span class="up">COMPLETE</span>'
           : '<span class="dimtxt">' + esc(t.state) + "</span>") + "</td>"
+      + "</tr>";
+  }).join("");
+}
+
+function renderActivityLog(entries){
+  var body = el("alBody"), empty = el("alEmpty");
+  entries = entries || [];
+  empty.classList.toggle("hidden", entries.length > 0);
+  body.innerHTML = entries.map(function(e){
+    var d = parseUtc(e.datetime);
+    return "<tr>"
+      + '<td class="dimtxt">' + clock(d) + ' <span class="dimtxt">(' + ago(d) + ')</span></td>'
+      + '<td><span class="pill ' + esc(e.category) + '">' + esc(String(e.category || "").toUpperCase()) + '</span></td>'
+      + '<td style="white-space:normal">' + esc(e.message) + '</td>'
       + "</tr>";
   }).join("");
 }
@@ -757,13 +940,22 @@ function renderPerformance(perf){
   function X(p){ return PL + (p.t.getTime() - t0) / span * (W - PL - PR); }
   function Y(v){ return PT + (1 - (v - lo) / (hi - lo)) * (H - PT - PB); }
 
+  // A fixed 1 decimal reads fine when the benchmarks have actually diverged,
+  // but a short or quiet window can span well under a single index point -
+  // rounded to 1dp, adjacent gridlines then print the same text. Scale the
+  // precision to the gap between gridlines instead of hardcoding it.
+  var gridStep = (hi - lo) / 3;
+  var gridDp = gridStep > 0
+    ? Math.max(1, Math.min(6, Math.ceil(-Math.log10(gridStep)) + 1))
+    : 1;
+
   var grid = "";
   for(var i = 0; i <= 3; i++){
     var y = PT + i / 3 * (H - PT - PB), val = hi - i / 3 * (hi - lo);
     grid += '<line class="gl" x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR)
           + '" y2="' + y.toFixed(1) + '"/>'
           + '<text class="lbl" x="' + (PL - 7) + '" y="' + (y + 3).toFixed(1)
-          + '" text-anchor="end">' + num(val, 1) + "</text>";
+          + '" text-anchor="end">' + num(val, gridDp) + "</text>";
   }
 
   var paths = keys.map(function(k){
@@ -840,9 +1032,11 @@ function renderPosition(coinHistory, held, price){
 
   if(!stop && !target){
     host.innerHTML = '<div class="empty">'
-      + "Stop-loss and take-profit are off. Set <code>stop_loss</code> and "
-      + "<code>take_profit</code> in user.cfg, then reopen a position \u2014 "
-      + "levels are fixed at entry and are not applied retroactively."
+      + "Stop-loss and take-profit are off for this position \u2014 either "
+      + "<code>stop_loss</code>/<code>take_profit</code> were 0 in user.cfg "
+      + "when it opened, or it predates that config. Levels are fixed at "
+      + "entry and are not applied retroactively, but you can set them now "
+      + "from the Open positions panel below."
       + "</div>";
     return;
   }
@@ -974,7 +1168,16 @@ function renderPriceHistory(rows){
     + axisStamp(new Date(tEnd), multiDay) + "</text></svg>";
 
   var change = (pts[pts.length - 1].v / pts[0].v - 1) * 100;
-  note.textContent = pts.length + " points \u00b7 " + pct(change);
+  var summary = pts.length + " points \u00b7 " + pct(change);
+  // A requested window (e.g. 1w) can hold far less real data than it asks
+  // for if the bot was off most of that time - say so, or a chart that is
+  // mostly one lone point plus a cluster at the end reads as broken rather
+  // than as an honest gap.
+  if(pricePeriod !== "all"){
+    var want = periodMs(pricePeriod);
+    if(want && span < want * 0.9) summary += " (only " + spanText(span) + " recorded)";
+  }
+  note.textContent = summary;
 }
 
 function renderRatchet(entries){
@@ -1058,11 +1261,14 @@ function refresh(){
       .catch(function(){ return {series: []}; }),
     getJSON("/api/ratchet").catch(function(){ return []; }),
     getJSON("/api/coins").catch(function(){ return []; }),
-    getJSON("/api/round_trips").catch(function(){ return []; })
+    getJSON("/api/round_trips").catch(function(){ return []; }),
+    getJSON("/api/positions").catch(function(){ return []; }),
+    getJSON("/api/activity_log").catch(function(){ return []; })
   ]).then(function(res){
     var current = res[0], trades = res[1], scouts = res[2],
         values  = res[3], coinHistory = res[4], orders = res[5],
-        perf    = res[6], ratchet = res[7], coins = res[8], trips = res[9];
+        perf    = res[6], ratchet = res[7], coins = res[8], trips = res[9],
+        positions = res[10], activity = res[11];
     var series  = buildSeries(values || {}, cfg ? cfg.BRIDGE_SYMBOL : null);
 
     el("err").classList.add("hidden");
@@ -1077,7 +1283,9 @@ function refresh(){
     renderStats(current, trades || [], series, coinHistory || []);
     renderJumpWatch(scouts || []);
     renderHoldings(values || {}, cfg ? cfg.BRIDGE_SYMBOL : null);
+    renderPositions(positions);
     renderTrades(trades || []);
+    renderActivityLog(activity);
     renderPerformance(perf);
     renderRatchet(ratchet);
     renderRoundTrips(trips);
@@ -1160,6 +1368,8 @@ function disarmSell(btn){
   btn.classList.remove("armed");
   btn.textContent = "Sell";
   btn.disabled = false;
+  var pctInput = btn.parentElement && btn.parentElement.querySelector("input.pct");
+  if(pctInput) pctInput.disabled = false;
   sellArmed = false;
 }
 
@@ -1168,11 +1378,20 @@ el("hodlBody").addEventListener("click", function(ev){
   if(!btn) return;
 
   var symbol = btn.getAttribute("data-sell");
+  var pctInput = btn.parentElement.querySelector("input.pct");
+  var pct = pctInput ? parseFloat(pctInput.value) : 100;
+
+  if(!(pct > 0) || pct > 100){
+    fail("Enter a percent between 0 and 100 to sell " + symbol + ".");
+    return;
+  }
 
   if(!btn.classList.contains("armed")){
-    // Selling is irreversible and immediate, so it takes two clicks.
+    // Selling is irreversible and immediate, so it takes two clicks. Lock the
+    // percent field once armed so what fires matches what is displayed.
     btn.classList.add("armed");
-    btn.textContent = "Sell all?";
+    btn.textContent = (pct >= 100) ? "Sell all?" : "Sell " + pct + "%?";
+    if(pctInput) pctInput.disabled = true;
     sellArmed = true;
     btn._armTimer = setTimeout(function(){ disarmSell(btn); }, 5000);
     return;
@@ -1184,7 +1403,8 @@ el("hodlBody").addEventListener("click", function(ev){
 
   fetch("/api/holdings/" + encodeURIComponent(symbol) + "/sell", {
     method: "POST",
-    headers: {"Content-Type": "application/json"}
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({percent: pct})
   }).then(function(r){
     return r.json().then(function(j){ return {ok: r.ok, data: j}; });
   }).then(function(res){
@@ -1194,6 +1414,49 @@ el("hodlBody").addEventListener("click", function(ev){
   }).catch(function(e){
     fail("Couldn't sell " + symbol + ": " + e.message);
     disarmSell(btn);
+  });
+});
+
+el("positionsBody").addEventListener("input", function(ev){
+  var inp = ev.target;
+  if(!inp.matches || !inp.matches("input[data-risk-for]")) return;
+  editedRisk[inp.getAttribute("data-risk-for") + ":" + inp.getAttribute("data-field")] = inp.value;
+});
+
+el("positionsBody").addEventListener("click", function(ev){
+  var btn = ev.target.closest("button[data-risk-save]");
+  if(!btn) return;
+
+  var symbol = btn.getAttribute("data-risk-save");
+  var row = btn.closest("tr");
+  var stopVal = row.querySelector('input[data-field="stop"]').value.trim();
+  var targetVal = row.querySelector('input[data-field="target"]').value.trim();
+
+  // A risk level is a standing instruction, not an immediate trade - it
+  // takes effect only if the market later reaches it - so unlike Sell/Buy
+  // this saves on a single click rather than arming a confirmation.
+  var origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Saving";
+
+  fetch("/api/positions/" + encodeURIComponent(symbol) + "/risk", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      stop_loss: stopVal === "" ? null : stopVal,
+      take_profit: targetVal === "" ? null : targetVal
+    })
+  }).then(function(r){
+    return r.json().then(function(j){ return {ok: r.ok, data: j}; });
+  }).then(function(res){
+    if(!res.ok) throw new Error(res.data.error || "the request was refused");
+    delete editedRisk[symbol + ":stop"];
+    delete editedRisk[symbol + ":target"];
+    return refresh();
+  }).catch(function(e){
+    fail("Couldn't update " + symbol + " risk levels: " + e.message);
+    btn.disabled = false;
+    btn.textContent = origText;
   });
 });
 
@@ -1218,7 +1481,8 @@ function fillCoinPickers(coins){
 
 function loadPriceHistory(){
   if(!priceCoin) return;
-  getJSON("/api/value_history/" + encodeURIComponent(priceCoin))
+  var q = pricePeriod === "all" ? "" : "?period=" + pricePeriod;
+  getJSON("/api/value_history/" + encodeURIComponent(priceCoin) + q)
     .then(renderPriceHistory)
     .catch(function(){ renderPriceHistory([]); });
 }
@@ -1227,6 +1491,23 @@ el("phCoin").addEventListener("change", function(){
   priceCoin = this.value;
   loadPriceHistory();
 });
+
+function markPricePeriod(){
+  var buttons = el("phPeriod").querySelectorAll("button[data-period]");
+  Array.prototype.forEach.call(buttons, function(b){
+    b.setAttribute("aria-pressed", b.getAttribute("data-period") === pricePeriod ? "true" : "false");
+  });
+}
+
+el("phPeriod").addEventListener("click", function(ev){
+  var btn = ev.target.closest("button[data-period]");
+  if(!btn) return;
+  pricePeriod = btn.getAttribute("data-period");
+  try { localStorage.setItem("pricePeriod", pricePeriod); } catch (e) { /* fine */ }
+  markPricePeriod();
+  loadPriceHistory();
+});
+markPricePeriod();
 
 function resetBuy(){
   var b = el("buyBtn");

@@ -252,6 +252,7 @@ class AutoTrader:
             if not self.manager.spread_is_acceptable(pair.to_coin.symbol, self.config.BRIDGE.symbol):
                 continue
             self.logger.info(f"Will be jumping from {coin} to {pair.to_coin_id}")
+            self.db.log_event("jump", f"Jumping from {coin.symbol} to {pair.to_coin_id} (ratio {ratio_dict[pair]:+.4g})")
             self.transaction_through_bridge(pair)
             return
 
@@ -278,32 +279,42 @@ class AutoTrader:
 
     def check_risk_levels(self):
         """
-        Close the open position if it has hit its stop or its target.
+        Close any open position that has hit its stop or its target.
 
-        This is the one place the bot will sell without buying something else,
-        so it is also the one place the ratchet's "never take a loss" invariant
-        is deliberately broken. Off unless stop_loss or take_profit is set.
+        Runs across every coin with a recorded entry, not just the bot's own
+        rotation seat: a coin bought manually, or edited live from the
+        dashboard, gets exactly the same protection as one the bot opened
+        itself from configured percentages. This is the one place the bot
+        will sell without buying something else, so it is also the one place
+        the ratchet's "never take a loss" invariant is deliberately broken.
+
+        No global on/off switch - a coin only gets checked if IT carries a
+        stop or target, which happens either from stop_loss/take_profit in
+        user.cfg (applied when the bot opens a position) or from setting
+        levels on an already-open position via the dashboard.
         """
-        if not (self.config.STOP_LOSS or self.config.TAKE_PROFIT):
-            return
-
-        position = self.db.get_current_position()
-        if not position:
-            return
-
-        stop, target = position.get("stop_loss"), position.get("take_profit")
-        if not (stop or target):
+        positions = self.db.get_open_positions()
+        if not positions:
             return
 
         bridge = self.config.BRIDGE.symbol
-        symbol = position["coin"]["symbol"]
+        for symbol, position in positions.items():
+            if symbol == bridge:
+                continue
+            stop, target = position.get("stop_loss"), position.get("take_profit")
+            if stop or target:
+                self._check_position_risk(symbol, stop, target, position.get("entry_price"))
+
+    def _check_position_risk(self, symbol: str, stop, target, entry):
+        bridge = self.config.BRIDGE.symbol
 
         price = self.manager.get_ticker_price(symbol + bridge)
         if price is None:
             return
 
-        # Only act on a position we actually hold; after a close the current
-        # coin still names the coin we just left.
+        # Only act on a position we actually hold; a coin can carry stale
+        # levels from a position that was already closed some other way (a
+        # normal jump out, or a manual sell).
         balance = self.manager.get_currency_balance(symbol)
         if not balance or balance * price <= self.manager.get_min_notional(symbol, bridge):
             return
@@ -315,11 +326,10 @@ class AutoTrader:
         else:
             return
 
-        entry = position.get("entry_price")
         move = f" ({(price / entry - 1) * 100:+.2f}% from entry)" if entry else ""
-        self.logger.warning(
-            f"{reason} hit on {symbol}: {price:.8g} vs {level:.8g}{move} - closing to {bridge}"
-        )
+        message = f"{reason} hit on {symbol}: {price:.8g} vs {level:.8g}{move} - closing to {bridge}"
+        self.logger.warning(message)
+        self.db.log_event("risk", message)
 
         coin = self.db.get_coin(symbol)
         if self.manager.sell_alt(coin, self.config.BRIDGE) is None:

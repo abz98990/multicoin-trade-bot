@@ -18,6 +18,7 @@ from .config import Config
 from .database import Database
 from .logger import Logger
 from .models import (
+    ActivityLog,
     Coin,
     CoinValue,
     CurrentCoin,
@@ -49,7 +50,7 @@ db = Database(logger, config)
 # Comparing a UTC column against local now() silently returns nothing for any
 # timezone east of UTC, so the cutoff has to match how each model stores time.
 # The real fix is to make every model agree, but that needs a data migration.
-_UTC_MODELS = (CurrentCoin, EquitySnapshot, RatchetEntry, ScoutHistory, Trade)
+_UTC_MODELS = (ActivityLog, CurrentCoin, EquitySnapshot, RatchetEntry, ScoutHistory, Trade)
 
 _PERIOD_UNITS = {
     "s": lambda n: timedelta(seconds=n),
@@ -287,11 +288,13 @@ def buy_holding():
     target = fill_price * (1 + target_pct / 100) if target_pct else None
     db.set_current_coin(symbol, fill_price, stop, target)
 
-    logger.info(
+    summary = (
         f"Manual buy filled: {filled:g} {symbol} for {spent:g} {bridge} at {fill_price:.8g}"
         + (f", stop {stop:.8g}" if stop else "")
         + (f", target {target:.8g}" if target else "")
     )
+    logger.info(summary)
+    db.log_event("trade", summary)
     return jsonify(
         {
             "symbol": symbol,
@@ -308,7 +311,10 @@ def buy_holding():
 @app.route("/api/holdings/<symbol>/sell", methods=["POST"])
 def sell_holding(symbol: str):
     """
-    Sell the whole free balance of one coin into the bridge, at market.
+    Sell some or all of the free balance of one coin into the bridge, at market.
+
+    Body: {"percent": 100} (default) sells the whole free balance; any value in
+    (0, 100] sells that fraction of it.
 
     Deliberately self-contained rather than reusing BinanceAPIManager.sell_alt:
     that path needs the websocket stream manager and the REST order poller,
@@ -322,6 +328,14 @@ def sell_holding(symbol: str):
     bridge = config.BRIDGE.symbol
     if symbol == bridge:
         return jsonify({"error": f"{bridge} is the bridge currency; there is nothing to sell it into."}), 400
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        percent = float(payload.get("percent", 100))
+    except (TypeError, ValueError):
+        return jsonify({"error": "percent must be a number."}), 400
+    if not 0 < percent <= 100:
+        return jsonify({"error": "percent must be greater than 0 and at most 100."}), 400
 
     pair = symbol + bridge
     client = binance_client()
@@ -342,19 +356,28 @@ def sell_holding(symbol: str):
     if not balance:
         return jsonify({"error": f"No free {symbol} to sell."}), 400
 
+    # The fraction requested, not the whole holding - this is what makes a
+    # partial sell possible. 100% reproduces the old sell-everything behaviour.
+    sell_balance = balance * percent / 100
+
     lot = _symbol_filter(pair, "LOT_SIZE")
     if lot is None:
         return jsonify({"error": f"{pair} is not a tradable pair."}), 400
 
     decimals = _step_decimals(lot["stepSize"])
     factor = 10 ** decimals
-    quantity = math.floor(balance * factor) / factor
+    quantity = math.floor(sell_balance * factor) / factor
     quantity = min(quantity, float(lot["maxQty"]))
     quantity = math.floor(quantity * factor) / factor
 
     if quantity < float(lot["minQty"]):
         return jsonify(
-            {"error": f"{balance:g} {symbol} is below the minimum order size of {lot['minQty']}."}
+            {
+                "error": (
+                    f"{percent:g}% of your {balance:g} {symbol} is {sell_balance:g}, below the "
+                    f"minimum order size of {lot['minQty']}."
+                )
+            }
         ), 400
 
     notional = _symbol_filter(pair, "NOTIONAL")
@@ -369,7 +392,10 @@ def sell_holding(symbol: str):
         ), 400
 
     quantity_s = "{:0.0{}f}".format(quantity, decimals)
-    logger.warning(f"Manual sell requested from the dashboard: {quantity_s} {symbol} -> {bridge}")
+    logger.warning(
+        f"Manual sell requested from the dashboard: {quantity_s} {symbol} ({percent:g}% of "
+        f"{balance:g}) -> {bridge}"
+    )
 
     trade_log = db.start_trade_log(db.get_coin(symbol), db.get_coin(bridge), True)
     try:
@@ -388,10 +414,13 @@ def sell_holding(symbol: str):
     trade_log.set_ordered(balance, None, quantity, int(order["orderId"]), price)
     trade_log.set_complete(received, fill_price)
 
-    logger.info(f"Manual sell filled: {filled:g} {symbol} for {received:g} {bridge}")
+    summary = f"Manual sell filled: {filled:g} {symbol} ({percent:g}%) for {received:g} {bridge}"
+    logger.info(summary)
+    db.log_event("trade", summary)
     return jsonify(
         {
             "symbol": symbol,
+            "percent": percent,
             "sold": filled,
             "received": received,
             "bridge": bridge,
@@ -399,6 +428,141 @@ def sell_holding(symbol: str):
             "status": order["status"],
         }
     )
+
+
+@app.route("/api/positions")
+def open_positions():
+    """
+    Every coin currently held, with its stop-loss/take-profit if any.
+
+    Built entirely from data already collected server-side - no new Binance
+    calls, so polling this every few seconds costs nothing extra. Balance and
+    price come from coin_value, which update_values already writes once a
+    minute; risk levels come from current_coin_history via get_open_positions.
+    Both can be up to a minute stale, the same as the Holdings panel.
+    """
+    bridge = config.BRIDGE.symbol
+    positions = db.get_open_positions()
+
+    session: Session
+    with db.db_session() as session:
+        # Bounded to the last day rather than the whole table: update_values
+        # writes every minute, so a coin actually held always has a row well
+        # within that window, and this avoids rescanning months of history on
+        # every poll as the table grows.
+        recent = (
+            session.query(CoinValue)
+            .filter(CoinValue.datetime >= datetime.utcnow() - timedelta(days=1))
+            .order_by(CoinValue.datetime.asc())
+            .all()
+        )
+        latest = {}
+        for cv in recent:
+            if cv.balance:
+                latest[cv.coin_id] = {"balance": cv.balance, "price": cv.usd_price}
+            else:
+                latest.pop(cv.coin_id, None)  # sold to zero since the last row
+
+    rows = []
+    for symbol, held in latest.items():
+        if symbol == bridge:
+            continue
+        pos = positions.get(symbol) or {}
+        entry, price = pos.get("entry_price"), held["price"]
+        rows.append(
+            {
+                "symbol": symbol,
+                "balance": held["balance"],
+                "price": price,
+                "entry_price": entry,
+                "stop_loss": pos.get("stop_loss"),
+                "take_profit": pos.get("take_profit"),
+                "opened": pos.get("datetime"),
+                "unrealized_percent": ((price / entry - 1) * 100) if (entry and price) else None,
+            }
+        )
+
+    rows.sort(key=lambda r: -(r["balance"] * (r["price"] or 0)))
+    return jsonify(rows)
+
+
+@app.route("/api/positions/<symbol>/risk", methods=["POST"])
+def set_position_risk(symbol: str):
+    """
+    Set or clear the stop-loss/take-profit on a coin you currently hold.
+
+    Body: {"stop_loss": pct, "take_profit": pct}, each a percentage below/above
+    entry, or null/omitted to clear that side. This is what makes levels
+    editable on an already-open position - set at buy time they only cover
+    positions opened from here on; this reaches ones already open, including
+    ones the bot itself opened from user.cfg's percentages.
+    """
+    if is_cross_origin():
+        return jsonify({"error": "Risk levels can only be changed from the dashboard itself."}), 403
+
+    symbol = symbol.upper()
+    bridge = config.BRIDGE.symbol
+    if symbol == bridge:
+        return jsonify({"error": f"{bridge} is the bridge currency and cannot carry risk levels."}), 400
+
+    payload = request.get_json(silent=True) or {}
+
+    def optional_percent(key):
+        raw = payload.get(key)
+        if raw in (None, ""):
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return "bad"
+        return value if value > 0 else None
+
+    stop_pct, target_pct = optional_percent("stop_loss"), optional_percent("take_profit")
+    if "bad" in (stop_pct, target_pct):
+        return jsonify({"error": "Stop-loss and take-profit must be numbers."}), 400
+
+    existing = db.get_open_positions().get(symbol)
+    entry = existing.get("entry_price") if existing else None
+    entry_is_estimated = False
+
+    if entry is None:
+        # No recorded cost basis - usually a coin the bot acquired before this
+        # feature existed. Fall back to the live price as a reference point so
+        # a level can still be set; the response says so, so the caller can
+        # tell the user "entry" here is an estimate, not a true purchase price.
+        try:
+            entry = float(binance_client().get_symbol_ticker(symbol=symbol + bridge)["price"])
+        except Exception as exc:  # pylint: disable=broad-except
+            return jsonify({"error": "Could not price {}: {}".format(symbol, exc)}), 502
+        entry_is_estimated = True
+
+    stop = entry * (1 - stop_pct / 100) if stop_pct else None
+    target = entry * (1 + target_pct / 100) if target_pct else None
+
+    info = db.set_position_risk(symbol, stop, target, fallback_entry_price=entry)
+    if info is None:
+        return jsonify({"error": f"Could not set levels for {symbol}."}), 400
+
+    return jsonify(
+        {
+            "symbol": symbol,
+            "entry_price": entry,
+            "entry_is_estimated": entry_is_estimated,
+            "stop_loss": stop,
+            "take_profit": target,
+        }
+    )
+
+
+@app.route("/api/activity_log")
+def activity_log():
+    """Recent decisions and changes: jumps, risk edits, stop/target hits, trades."""
+    session: Session
+    with db.db_session() as session:
+        query = session.query(ActivityLog).order_by(ActivityLog.datetime.desc())
+        query = filter_period(query, ActivityLog)
+        entries = query.limit(200).all()
+        return jsonify([entry.info() for entry in entries])
 
 
 @app.route("/api/open_orders")

@@ -166,6 +166,9 @@ class MockDatabase(Database):
     ):
         pass
 
+    def log_event(self, category: str, message: str):
+        pass
+
 
 def backtest(
     start_date: datetime = None,

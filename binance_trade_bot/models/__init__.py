@@ -1,3 +1,4 @@
+from .activity_log import ActivityLog
 from .base import Base
 from .coin import Coin
 from .coin_value import CoinValue, Interval
