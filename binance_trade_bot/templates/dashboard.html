@@ -140,6 +140,8 @@
   .posgrid div span{display:block}
   .posgrid .lab{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em}
   .posgrid .val{font:600 15px/1.3 var(--mono);margin-top:3px}
+  .pos-block + .pos-block{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+  .pos-block-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px}
 
   .form{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
   .form label{display:flex;flex-direction:column;gap:5px;font-size:10px;color:var(--dim);
@@ -215,7 +217,7 @@
   <div class="grid">
 
     <div class="card wide">
-      <h2>Position <span class="note" id="posNote">&nbsp;</span></h2>
+      <h2>Protected positions <span class="note" id="posNote">&nbsp;</span></h2>
       <div class="body"><div id="posBody"></div></div>
     </div>
 
@@ -1011,78 +1013,69 @@ note.textContent = summary;
   }
 }
 
-function renderPosition(coinHistory, held, price){
+function renderProtected(positions){
   var host = el("posBody"), note = el("posNote");
-  var pos = null;
+  var rows = (positions || []).filter(function(p){ return p.stop_loss || p.take_profit; });
 
-  (coinHistory || []).forEach(function(p){
-    if(!pos || parseUtc(p.datetime) > parseUtc(pos.datetime)) pos = p;
-  });
-
-  if(!pos){
-    host.innerHTML = '<div class="empty">No position recorded yet.</div>';
+  if(!rows.length){
     note.textContent = "";
-    return;
-  }
-
-  var symbol = pos.coin ? pos.coin.symbol : (held && held.symbol) || "?";
-  note.textContent = symbol + " \u00b7 opened " + ago(parseUtc(pos.datetime));
-
-  var entry = pos.entry_price, stop = pos.stop_loss, target = pos.take_profit;
-
-  if(!stop && !target){
     host.innerHTML = '<div class="empty">'
-      + "Stop-loss and take-profit are off for this position \u2014 either "
-      + "<code>stop_loss</code>/<code>take_profit</code> were 0 in user.cfg "
-      + "when it opened, or it predates that config. Levels are fixed at "
-      + "entry and are not applied retroactively, but you can set them now "
+      + "No coin currently carries a stop-loss or take-profit — set one "
       + "from the Open positions panel below."
       + "</div>";
     return;
   }
 
-  // Draw the band the position lives in. Without one of the two levels the
-  // band is open-ended, so fall back to a symmetric distance from entry to
-  // keep the marker meaningful rather than pinned to an edge.
-  var span = entry ? Math.abs((target || entry) - (stop || entry)) || entry * 0.1 : 1;
-  var lo = stop || (entry ? entry - span : 0);
-  var hi = target || (entry ? entry + span : 1);
-  function place(v){
-    if(v == null || hi === lo) return null;
-    return Math.max(0, Math.min(100, (v - lo) / (hi - lo) * 100));
-  }
+  note.textContent = rows.length + (rows.length === 1 ? " coin protected" : " coins protected");
 
-  var atNow = place(price), atEntry = place(entry);
-  var toStop = (price && stop) ? (stop / price - 1) * 100 : null;
-  var toTarget = (price && target) ? (target / price - 1) * 100 : null;
-  var pnl = (price && entry) ? (price / entry - 1) * 100 : null;
+  host.innerHTML = rows.map(function(p){
+    var entry = p.entry_price, price = p.price, stop = p.stop_loss, target = p.take_profit;
 
-  var fillColour = pnl == null ? "var(--dim)" : (pnl >= 0 ? "var(--up)" : "var(--down)");
+    // Draw the band the position lives in. Without one of the two levels the
+    // band is open-ended, so fall back to a symmetric distance from entry to
+    // keep the marker meaningful rather than pinned to an edge.
+    var span = entry ? Math.abs((target || entry) - (stop || entry)) || entry * 0.1 : 1;
+    var lo = stop || (entry ? entry - span : 0);
+    var hi = target || (entry ? entry + span : 1);
+    function place(v){
+      if(v == null || hi === lo) return null;
+      return Math.max(0, Math.min(100, (v - lo) / (hi - lo) * 100));
+    }
 
-  host.innerHTML =
-      '<div class="range">'
-    +   '<span class="cap lo">' + (stop ? "stop " + sig(stop) : "no stop") + "</span>"
-    +   '<span class="cap hi">' + (target ? "target " + sig(target) : "no target") + "</span>"
-    +   '<div class="track">'
-    +     (atNow == null ? "" : '<i style="width:' + atNow.toFixed(1) + '%;background:' + fillColour + '"></i>')
-    +   "</div>"
-    +   (atEntry == null ? "" : '<div class="tick" style="left:' + atEntry.toFixed(1) + '%"></div>')
-    +   (atNow == null ? "" : '<div class="now" style="left:' + atNow.toFixed(1) + '%"></div>')
-    +   (atNow == null ? "" : '<span class="cap mid" style="left:' + atNow.toFixed(1) + '%">'
-          + sig(price) + "</span>")
-    + "</div>"
-    + '<div class="posgrid">'
-    +   '<div><span class="lab">Entry</span><span class="val">' + (entry ? sig(entry) : "—") + "</span></div>"
-    +   '<div><span class="lab">Now</span><span class="val">' + (price ? sig(price) : "—") + "</span></div>"
-    +   '<div><span class="lab">Unrealised</span><span class="val ' + (pnl == null ? "" : (pnl >= 0 ? "up" : "down"))
-    +     '">' + (pnl == null ? "—" : pct(pnl)) + "</span></div>"
-    +   '<div><span class="lab">To stop</span><span class="val down">'
-    +     (toStop == null ? "—" : pct(toStop)) + "</span></div>"
-    +   '<div><span class="lab">To target</span><span class="val up">'
-    +     (toTarget == null ? "—" : pct(toTarget)) + "</span></div>"
-    + "</div>";
+    var atNow = place(price), atEntry = place(entry);
+    var toStop = (price && stop) ? (stop / price - 1) * 100 : null;
+    var toTarget = (price && target) ? (target / price - 1) * 100 : null;
+    var pnl = p.unrealized_percent;
+    var fillColour = pnl == null ? "var(--dim)" : (pnl >= 0 ? "var(--up)" : "var(--down)");
+    var age = p.opened ? ago(parseUtc(p.opened)) : null;
+
+    return '<div class="pos-block">'
+      + '<div class="pos-block-head"><span class="coin">' + esc(p.symbol) + "</span>"
+      +   (age ? '<span class="dimtxt">opened ' + age + "</span>" : "") + "</div>"
+      + '<div class="range">'
+      +   '<span class="cap lo">' + (stop ? "stop " + sig(stop) : "no stop") + "</span>"
+      +   '<span class="cap hi">' + (target ? "target " + sig(target) : "no target") + "</span>"
+      +   '<div class="track">'
+      +     (atNow == null ? "" : '<i style="width:' + atNow.toFixed(1) + '%;background:' + fillColour + '"></i>')
+      +   "</div>"
+      +   (atEntry == null ? "" : '<div class="tick" style="left:' + atEntry.toFixed(1) + '%"></div>')
+      +   (atNow == null ? "" : '<div class="now" style="left:' + atNow.toFixed(1) + '%"></div>')
+      +   (atNow == null ? "" : '<span class="cap mid" style="left:' + atNow.toFixed(1) + '%">'
+            + sig(price) + "</span>")
+      + "</div>"
+      + '<div class="posgrid">'
+      +   '<div><span class="lab">Entry</span><span class="val">' + (entry ? sig(entry) : "—") + "</span></div>"
+      +   '<div><span class="lab">Now</span><span class="val">' + (price ? sig(price) : "—") + "</span></div>"
+      +   '<div><span class="lab">Unrealised</span><span class="val ' + (pnl == null ? "" : (pnl >= 0 ? "up" : "down"))
+      +     '">' + (pnl == null ? "—" : pct(pnl)) + "</span></div>"
+      +   '<div><span class="lab">To stop</span><span class="val down">'
+      +     (toStop == null ? "—" : pct(toStop)) + "</span></div>"
+      +   '<div><span class="lab">To target</span><span class="val up">'
+      +     (toTarget == null ? "—" : pct(toTarget)) + "</span></div>"
+      + "</div>"
+      + "</div>";
+  }).join("");
 }
-
 function renderRoundTrips(trips){
   var body = el("rtripBody"), empty = el("rtripEmpty");
   trips = trips || [];
@@ -1274,11 +1267,7 @@ function refresh(){
     el("err").classList.add("hidden");
     el("liveDot").classList.remove("stale");
 
-    var heldPrice = null;
-    (scouts || []).forEach(function(s){
-      if(heldPrice === null || s.datetime > heldPrice.datetime) heldPrice = s;
-    });
-    renderPosition(coinHistory, current, heldPrice && heldPrice.current_coin_price);
+    renderProtected(positions);
     renderOrders(orders);
     renderStats(current, trades || [], series, coinHistory || []);
     renderJumpWatch(scouts || []);

@@ -527,13 +527,29 @@ def set_position_risk(symbol: str):
 
     if entry is None:
         # No recorded cost basis - usually a coin the bot acquired before this
-        # feature existed. Fall back to the live price as a reference point so
-        # a level can still be set; the response says so, so the caller can
-        # tell the user "entry" here is an estimate, not a true purchase price.
+        # feature existed. Try a live price first; testnet's listed pairs
+        # shift over time (a coin can end up with no USDT/BTC pair at all,
+        # raising -1121 here), so fall back to the last price update_values
+        # recorded for it - the same number already shown in this coin's
+        # Price column - before giving up entirely. Either way the response
+        # flags this as an estimate, not a true purchase price.
         try:
             entry = float(binance_client().get_symbol_ticker(symbol=symbol + bridge)["price"])
-        except Exception as exc:  # pylint: disable=broad-except
-            return jsonify({"error": "Could not price {}: {}".format(symbol, exc)}), 502
+        except Exception:  # pylint: disable=broad-except
+            session: Session
+            with db.db_session() as session:
+                last = (
+                    session.query(CoinValue)
+                    .filter(CoinValue.coin_id == symbol, CoinValue.balance > 0)
+                    .order_by(CoinValue.datetime.desc())
+                    .first()
+                )
+                entry = last.usd_price if last else None
+            if entry is None:
+                return (
+                    jsonify({"error": f"{symbol} has no live price and no recent recorded price to use as a reference."}),
+                    502,
+                )
         entry_is_estimated = True
 
     stop = entry * (1 - stop_pct / 100) if stop_pct else None
