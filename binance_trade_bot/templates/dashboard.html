@@ -298,6 +298,29 @@
       </div></div>
     </div>
 
+    <div class="card wide">
+      <h2>Jump thresholds
+        <span class="h2right">
+          <span class="note" id="marginNote">edge required before a jump fires</span>
+          <span class="riskctl">
+            <input class="pct" id="globalMarginInput" type="number" min="0" step="any" placeholder="none">
+            <span class="unit" id="globalMarginUnit">%</span>
+          </span>
+          <button class="btn" type="button" id="globalMarginSave">Save global</button>
+        </span>
+      </h2>
+      <div class="body flush"><div class="scroll">
+        <table class="cozy">
+          <thead><tr>
+            <th>Coin</th><th class="num" id="marginEffectiveHead">Effective</th>
+            <th style="width:110px">Override</th><th></th>
+          </tr></thead>
+          <tbody id="marginBody"></tbody>
+        </table>
+        <div class="empty hidden" id="marginEmpty">No coins configured yet.</div>
+      </div></div>
+    </div>
+
     <div class="split">
       <div class="card">
         <h2>Performance
@@ -435,6 +458,9 @@ var coinsLoaded = false;
 // "<symbol>:stop" / "<symbol>:target" - survives a poll tick so an edit in
 // progress on one field isn't wiped out by the server's view of the other.
 var editedRisk = {};
+// Same idea for the jump-threshold override inputs, keyed by symbol; "global"
+// for the site-wide field.
+var editedMargin = {};
 
 // Which slice of a coin's price history is shown - independent of perfPeriod,
 // since a strategy question ("last week") and a price question ("just now")
@@ -662,6 +688,52 @@ function renderJumpWatch(scouts){
       + '<td><div class="bar"><i class="' + cls + '" style="width:'
       + (frac * 100).toFixed(1) + '%"></i></div></td>'
       + '<td class="num dimtxt">' + ago(r._d) + "</td>"
+      + "</tr>";
+  }).join("");
+}
+
+function renderMarginTable(coins, globalOverride, cfgObj){
+  var useMargin = cfgObj && String(cfgObj.USE_MARGIN).toLowerCase() === "yes";
+  var unit = useMargin ? "%" : "";
+  var configDefault = cfgObj ? Number(useMargin ? cfgObj.SCOUT_MARGIN : cfgObj.SCOUT_MULTIPLIER) : null;
+  el("globalMarginUnit").textContent = unit;
+  el("marginEffectiveHead").textContent = useMargin ? "Effective margin" : "Effective multiplier";
+
+  // Mirror the global input's own edit-preservation, then the table's.
+  var focused = document.activeElement;
+  var globalFocused = focused && focused.id === "globalMarginInput";
+  if(!globalFocused){
+    var globalVal = editedMargin.hasOwnProperty("global") ? editedMargin.global
+      : (globalOverride != null ? num(globalOverride, 3) : "");
+    if(el("globalMarginInput").value !== globalVal) el("globalMarginInput").value = globalVal;
+  }
+  el("marginNote").textContent = "edge required before a jump fires — default from user.cfg is "
+    + (configDefault == null ? "—" : num(configDefault, 3) + unit);
+
+  var body = el("marginBody"), empty = el("marginEmpty");
+  var rows = (coins || []).filter(function(c){ return c.enabled; })
+    .sort(function(a, b){ return a.symbol < b.symbol ? -1 : 1; });
+  empty.classList.toggle("hidden", rows.length > 0);
+
+  if(focused && focused.matches && focused.matches("input[data-margin-for]")) return;
+
+  body.innerHTML = rows.map(function(c){
+    var override = c.scout_margin_override;
+    var effective = override != null ? override : (globalOverride != null ? globalOverride : configDefault);
+    var source = override != null ? "" : (globalOverride != null ? " (global)" : " (default)");
+    var key = c.symbol;
+    var inputVal = editedMargin.hasOwnProperty(key) ? editedMargin[key]
+      : (override != null ? num(override, 3) : "");
+
+    return "<tr>"
+      + '<td class="coin">' + esc(c.symbol) + "</td>"
+      + '<td class="num dimtxt">' + (effective == null ? "—" : num(effective, 3) + unit)
+      +   '<span class="dimtxt">' + source + "</span></td>"
+      + '<td><span class="riskctl">'
+      +   '<input class="pct" type="number" min="0" step="any" placeholder="none" value="' + esc(inputVal)
+      +   '" data-margin-for="' + esc(c.symbol) + '" aria-label="Jump threshold override for ' + esc(c.symbol) + '">'
+      +   '<span class="unit">' + unit + "</span></span></td>"
+      + '<td style="text-align:right"><button class="btn" type="button" data-margin-save="' + esc(c.symbol) + '">Save</button></td>'
       + "</tr>";
   }).join("");
 }
@@ -1256,12 +1328,13 @@ function refresh(){
     getJSON("/api/coins").catch(function(){ return []; }),
     getJSON("/api/round_trips").catch(function(){ return []; }),
     getJSON("/api/positions").catch(function(){ return []; }),
-    getJSON("/api/activity_log").catch(function(){ return []; })
+    getJSON("/api/activity_log").catch(function(){ return []; }),
+    getJSON("/api/scout_settings").catch(function(){ return {margin_override: null}; })
   ]).then(function(res){
     var current = res[0], trades = res[1], scouts = res[2],
         values  = res[3], coinHistory = res[4], orders = res[5],
         perf    = res[6], ratchet = res[7], coins = res[8], trips = res[9],
-        positions = res[10], activity = res[11];
+        positions = res[10], activity = res[11], scoutSettings = res[12];
     var series  = buildSeries(values || {}, cfg ? cfg.BRIDGE_SYMBOL : null);
 
     el("err").classList.add("hidden");
@@ -1271,6 +1344,7 @@ function refresh(){
     renderOrders(orders);
     renderStats(current, trades || [], series, coinHistory || []);
     renderJumpWatch(scouts || []);
+    renderMarginTable(coins, scoutSettings ? scoutSettings.margin_override : null, cfg);
     renderHoldings(values || {}, cfg ? cfg.BRIDGE_SYMBOL : null);
     renderPositions(positions);
     renderTrades(trades || []);
@@ -1447,6 +1521,51 @@ el("positionsBody").addEventListener("click", function(ev){
     btn.disabled = false;
     btn.textContent = origText;
   });
+});
+
+el("marginBody").addEventListener("input", function(ev){
+  var inp = ev.target;
+  if(!inp.matches || !inp.matches("input[data-margin-for]")) return;
+  editedMargin[inp.getAttribute("data-margin-for")] = inp.value;
+});
+
+el("globalMarginInput").addEventListener("input", function(){
+  editedMargin.global = this.value;
+});
+
+function saveMargin(symbolOrNull, value, btn){
+  var origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Saving";
+
+  var url = symbolOrNull ? "/api/coins/" + encodeURIComponent(symbolOrNull) + "/scout_margin" : "/api/scout_settings";
+  fetch(url, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({margin: value === "" ? null : value})
+  }).then(function(r){
+    return r.json().then(function(j){ return {ok: r.ok, data: j}; });
+  }).then(function(res){
+    if(!res.ok) throw new Error(res.data.error || "the request was refused");
+    delete editedMargin[symbolOrNull || "global"];
+    return refresh();
+  }).catch(function(e){
+    fail("Couldn't update the jump threshold: " + e.message);
+    btn.disabled = false;
+    btn.textContent = origText;
+  });
+}
+
+el("marginBody").addEventListener("click", function(ev){
+  var btn = ev.target.closest("button[data-margin-save]");
+  if(!btn) return;
+  var symbol = btn.getAttribute("data-margin-save");
+  var value = btn.closest("tr").querySelector("input[data-margin-for]").value.trim();
+  saveMargin(symbol, value, btn);
+});
+
+el("globalMarginSave").addEventListener("click", function(){
+  saveMargin(null, el("globalMarginInput").value.trim(), this);
 });
 
 function fillCoinPickers(coins){
