@@ -767,6 +767,61 @@ def coins():
         return jsonify([{**coin.info(), "is_current": coin == _current_coin} for coin in _coins])
 
 
+def _parse_margin(payload):
+    """None/"" clears the override; otherwise a number >= 0. "bad" on error."""
+    raw = payload.get("margin")
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return "bad"
+    return value if value >= 0 else "bad"
+
+
+@app.route("/api/coins/<symbol>/scout_margin", methods=["POST"])
+def set_coin_scout_margin(symbol: str):
+    """
+    Override the jump-threshold margin (or multiplier, under USE_MARGIN=no)
+    used when scouting FROM this coin specifically. Body: {"margin": value}
+    or {} to clear back to the global/file setting. A standing trait of the
+    coin - unlike stop_loss/take_profit, not tied to any one holding period.
+    """
+    if is_cross_origin():
+        return jsonify({"error": "Jump thresholds can only be changed from the dashboard itself."}), 403
+
+    symbol = symbol.upper()
+    margin = _parse_margin(request.get_json(silent=True) or {})
+    if margin == "bad":
+        return jsonify({"error": "margin must be a number that is not negative."}), 400
+
+    info = db.set_coin_scout_margin_override(symbol, margin)
+    if info is None:
+        return jsonify({"error": f"{symbol} is not a known coin."}), 400
+    return jsonify(info)
+
+
+@app.route("/api/scout_settings", methods=["GET", "POST"])
+def scout_settings():
+    """
+    The site-wide jump-threshold override. GET returns the current value;
+    POST sets it. Body: {"margin": value} or {} to clear back to user.cfg's
+    setting. A per-coin override takes priority over this when both apply.
+    """
+    if request.method == "GET":
+        return jsonify({"margin_override": db.get_scout_margin_override()})
+
+    if is_cross_origin():
+        return jsonify({"error": "Jump thresholds can only be changed from the dashboard itself."}), 403
+
+    margin = _parse_margin(request.get_json(silent=True) or {})
+    if margin == "bad":
+        return jsonify({"error": "margin must be a number that is not negative."}), 400
+
+    db.set_scout_margin_override(margin)
+    return jsonify({"margin_override": margin})
+
+
 @app.route("/api/pairs")
 def pairs():
     session: Session

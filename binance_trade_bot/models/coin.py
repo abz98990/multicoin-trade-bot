@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, DateTime, String
+from sqlalchemy import Boolean, Column, DateTime, Float, String
 
 from .base import Base
 
@@ -10,6 +10,12 @@ class Coin(Base):
 
     # Set when a stop-loss fires, to keep the bot from buying straight back in.
     cooldown_until = Column(DateTime)
+
+    # Overrides the global scout margin/multiplier when scouting FROM this
+    # coin specifically - a standing trait of the coin ("PEPE always needs a
+    # bigger edge"), not tied to any one holding period the way stop_loss/
+    # take_profit are. None means "use the global setting".
+    scout_margin_override = Column(Float)
 
     def __init__(self, symbol, enabled=True):
         self.symbol = symbol
@@ -30,4 +36,5 @@ class Coin(Base):
             "symbol": self.symbol,
             "enabled": self.enabled,
             "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else None,
+            "scout_margin_override": self.scout_margin_override,
         }

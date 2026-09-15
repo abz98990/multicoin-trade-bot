@@ -1,20 +1,23 @@
 # Coins the bot may rotate between. Lines starting with '#' are ignored.
 # EOS / OMG / XMR have no USDT pair on the Binance spot testnet, so they are
 # disabled while testnet=True. Re-enable them if you switch to production.
+ACE
 ADA
 ATOM
 BAT
 BTTC
+CRWDB
 DASH
 DOGE
 #EOS
 ETC
 ETH
-ICX
+#ICX - no pair on testnet, and ICXUSDT is status BREAK (halted) on mainnet too
 IOTA
 NEO
 #OMG
 ONT
+PEPE
 QTUM
 TRX
 VET

@@ -6,5 +6,6 @@ from .current_coin import CurrentCoin
 from .pair import Pair
 from .performance import BenchmarkAnchor, EquitySnapshot, RatchetEntry
 from .scout_history import ScoutHistory
+from .scout_settings import ScoutSettings
 from .trade import Trade, TradeState
 from .unknown_ticker import UnknownTicker

@@ -165,11 +165,29 @@ class AutoTrader:
         """
         raise NotImplementedError()
 
+    def _scout_threshold(self, from_coin_symbol: str) -> float:
+        """
+        The margin (or multiplier, depending on USE_MARGIN) actually in
+        effect for jumps FROM this coin: a per-coin override if one is set,
+        else the site-wide override, else user.cfg's value. Resolved fresh
+        on every call, so a change made from the dashboard takes effect on
+        the very next scout pass rather than needing a restart.
+        """
+        default = self.config.SCOUT_MARGIN if self.config.USE_MARGIN == "yes" else self.config.SCOUT_MULTIPLIER
+        override = self.db.get_coin_scout_margin_override(from_coin_symbol)
+        if override is not None:
+            return override
+        override = self.db.get_scout_margin_override()
+        if override is not None:
+            return override
+        return default
+
     def _get_ratios(self, coin: Coin, coin_price):
         """
         Given a coin, get the current price ratio for every other enabled coin
         """
         ratio_dict: Dict[Pair, float] = {}
+        threshold = self._scout_threshold(coin.symbol)
 
         for pair in self.db.get_pairs_from(coin):
             optional_coin_price = self.manager.get_ticker_price(pair.to_coin + self.config.BRIDGE)
@@ -178,6 +196,15 @@ class AutoTrader:
                 ticker = pair.to_coin + self.config.BRIDGE
                 if not self.manager.is_known_dead_ticker(ticker):
                     self.logger.info(f"Skipping scouting... optional coin {ticker} not found")
+                continue
+
+            if pair.ratio is None:
+                # initialize_trade_thresholds() sets this once at startup and
+                # skips a pair if either side failed to price at that exact
+                # moment - nothing else ever retries it, so a single bad tick
+                # on a flaky testnet can strand a pair here permanently.
+                # There is nothing to compare against yet, so wait for the
+                # next full initialization instead of comparing to nothing.
                 continue
 
             self.db.log_scout(pair, pair.ratio, coin_price, optional_coin_price)
@@ -192,11 +219,11 @@ class AutoTrader:
 
             if self.config.USE_MARGIN == "yes":
                 ratio_dict[pair] = (
-                    (1 - transaction_fee) * coin_opt_coin_ratio / pair.ratio - 1 - self.config.SCOUT_MARGIN / 100
+                    (1 - transaction_fee) * coin_opt_coin_ratio / pair.ratio - 1 - threshold / 100
                 )
             else:
                 ratio_dict[pair] = (
-                    coin_opt_coin_ratio - transaction_fee * self.config.SCOUT_MULTIPLIER * coin_opt_coin_ratio
+                    coin_opt_coin_ratio - transaction_fee * threshold * coin_opt_coin_ratio
                 ) - pair.ratio
         return ratio_dict
 

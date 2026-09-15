@@ -86,6 +86,46 @@ class Database:
             session.expunge_all()
             return coins
 
+    def get_scout_margin_override(self) -> Optional[float]:
+        """The site-wide override, or None if it's never been set/was cleared."""
+        session: Session
+        with self.db_session() as session:
+            row = session.query(ScoutSettings).get(1)
+            return row.margin_override if row else None
+
+    def set_scout_margin_override(self, value: Optional[float]):
+        """value=None clears the override, falling back to user.cfg's setting."""
+        session: Session
+        with self.db_session() as session:
+            row = session.query(ScoutSettings).get(1)
+            if row is None:
+                row = ScoutSettings()
+                session.add(row)
+            row.margin_override = value
+        self.log_event(
+            "risk",
+            f"Global jump threshold override set to {'none' if value is None else f'{value:g}%'}",
+        )
+
+    def get_coin_scout_margin_override(self, symbol: str) -> Optional[float]:
+        """The per-coin override for scouting FROM this coin, or None."""
+        coin = self.get_coin(symbol)
+        return coin.scout_margin_override if coin else None
+
+    def set_coin_scout_margin_override(self, symbol: str, value: Optional[float]):
+        """value=None clears it, falling back to the global/file setting."""
+        session: Session
+        with self.db_session() as session:
+            coin: Coin = session.query(Coin).get(symbol)
+            if coin is None:
+                return None
+            coin.scout_margin_override = value
+        self.log_event(
+            "risk",
+            f"{symbol} jump threshold override set to {'none' if value is None else f'{value:g}%'}",
+        )
+        return self.get_coin(symbol).info()
+
     def get_coin(self, coin: Union[Coin, str]) -> Coin:
         if isinstance(coin, Coin):
             return coin
@@ -385,6 +425,7 @@ class Database:
         ("current_coin_history", "stop_loss", "FLOAT"),
         ("current_coin_history", "take_profit", "FLOAT"),
         ("coins", "cooldown_until", "DATETIME"),
+        ("coins", "scout_margin_override", "FLOAT"),
     )
 
     def create_database(self):
