@@ -175,7 +175,9 @@ class AutoTrader:
             optional_coin_price = self.manager.get_ticker_price(pair.to_coin + self.config.BRIDGE)
 
             if optional_coin_price is None:
-                self.logger.info(f"Skipping scouting... optional coin {pair.to_coin + self.config.BRIDGE} not found")
+                ticker = pair.to_coin + self.config.BRIDGE
+                if not self.manager.is_known_dead_ticker(ticker):
+                    self.logger.info(f"Skipping scouting... optional coin {ticker} not found")
                 continue
 
             self.db.log_scout(pair, pair.ratio, coin_price, optional_coin_price)

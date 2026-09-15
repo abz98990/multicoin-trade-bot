@@ -248,15 +248,28 @@ def buy_holding():
     except Exception as exc:  # pylint: disable=broad-except
         return jsonify({"error": "Could not price {}: {}".format(pair, exc)}), 502
 
-    decimals = _step_decimals(lot["stepSize"])
+    # This places a MARKET order, which Binance constrains with its own
+    # MARKET_LOT_SIZE filter on top of LOT_SIZE - usually a much smaller
+    # maxQty, meant to cap how much a single market order can move the
+    # book. A quantity that clears LOT_SIZE alone can still be rejected at
+    # placement, so both filters have to be satisfied together.
+    market_lot = _symbol_filter(pair, "MARKET_LOT_SIZE")
+    step = max(float(lot["stepSize"]), float(market_lot["stepSize"])) if market_lot else float(lot["stepSize"])
+    step = step or float(lot["stepSize"])  # a 0 stepSize means "no extra constraint" from that filter
+    min_qty = max(float(lot["minQty"]), float(market_lot["minQty"])) if market_lot else float(lot["minQty"])
+    max_qty = float(lot["maxQty"])
+    if market_lot and float(market_lot["maxQty"]):
+        max_qty = min(max_qty, float(market_lot["maxQty"]))
+
+    decimals = _step_decimals(f"{step:.8f}")
     factor = 10 ** decimals
     quantity = math.floor(amount / price * factor) / factor
-    quantity = min(quantity, float(lot["maxQty"]))
+    quantity = min(quantity, max_qty)
     quantity = math.floor(quantity * factor) / factor
 
-    if quantity < float(lot["minQty"]):
+    if quantity < min_qty:
         return jsonify(
-            {"error": f"{amount:g} {bridge} buys less than the minimum order size of {lot['minQty']} {symbol}."}
+            {"error": f"{amount:g} {bridge} buys less than the minimum order size of {min_qty:g} {symbol}."}
         ), 400
 
     notional = _symbol_filter(pair, "NOTIONAL")
@@ -364,18 +377,31 @@ def sell_holding(symbol: str):
     if lot is None:
         return jsonify({"error": f"{pair} is not a tradable pair."}), 400
 
-    decimals = _step_decimals(lot["stepSize"])
+    # This places a MARKET order, which Binance constrains with its own
+    # MARKET_LOT_SIZE filter on top of LOT_SIZE - usually a much smaller
+    # maxQty, meant to cap how much a single market order can move the
+    # book. A quantity that clears LOT_SIZE alone can still be rejected at
+    # placement, so both filters have to be satisfied together.
+    market_lot = _symbol_filter(pair, "MARKET_LOT_SIZE")
+    step = max(float(lot["stepSize"]), float(market_lot["stepSize"])) if market_lot else float(lot["stepSize"])
+    step = step or float(lot["stepSize"])  # a 0 stepSize means "no extra constraint" from that filter
+    min_qty = max(float(lot["minQty"]), float(market_lot["minQty"])) if market_lot else float(lot["minQty"])
+    max_qty = float(lot["maxQty"])
+    if market_lot and float(market_lot["maxQty"]):
+        max_qty = min(max_qty, float(market_lot["maxQty"]))
+
+    decimals = _step_decimals(f"{step:.8f}")
     factor = 10 ** decimals
     quantity = math.floor(sell_balance * factor) / factor
-    quantity = min(quantity, float(lot["maxQty"]))
+    quantity = min(quantity, max_qty)
     quantity = math.floor(quantity * factor) / factor
 
-    if quantity < float(lot["minQty"]):
+    if quantity < min_qty:
         return jsonify(
             {
                 "error": (
                     f"{percent:g}% of your {balance:g} {symbol} is {sell_balance:g}, below the "
-                    f"minimum order size of {lot['minQty']}."
+                    f"minimum order size of {min_qty:g}."
                 )
             }
         ), 400

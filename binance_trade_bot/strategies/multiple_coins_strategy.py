@@ -20,7 +20,9 @@ class Strategy(AutoTrader):
             coin_price = self.manager.get_ticker_price(coin + self.config.BRIDGE)
 
             if coin_price is None:
-                self.logger.info(f"Skipping scouting... current coin {coin + self.config.BRIDGE} not found")
+                pair = coin + self.config.BRIDGE
+                if not self.manager.is_known_dead_ticker(pair):
+                    self.logger.info(f"Skipping scouting... current coin {pair} not found")
                 continue
 
             min_notional = self.manager.get_min_notional(coin.symbol, self.config.BRIDGE.symbol)

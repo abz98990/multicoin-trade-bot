@@ -142,6 +142,15 @@ class BinanceAPIManager:
 
         return price
 
+    def is_known_dead_ticker(self, ticker_symbol: str) -> bool:
+        """
+        True once get_ticker_price has already confirmed this ticker doesn't
+        exist. Lets a caller log "not found" only the first time - repeating
+        it every cycle for a permanently delisted pair (ICX on this testnet,
+        say) drowns out the log without saying anything new.
+        """
+        return ticker_symbol in self.cache.non_existent_tickers
+
     def get_currency_balance(self, currency_symbol: str, force=False) -> float:
         """
         Get balance of a specific coin
