@@ -4,6 +4,8 @@ import time
 from .binance_api_manager import BinanceAPIManager
 from .config import Config
 from .database import Database
+from .email_config import EmailConfig
+from .email_notifier import EmailNotifier
 from .logger import Logger
 from .scheduler import SafeScheduler
 from .strategies import get_strategy
@@ -49,6 +51,9 @@ def main():
     schedule.every(1).minutes.do(trader.log_performance).tag("sampling performance")
     schedule.every(1).minutes.do(db.prune_scout_history).tag("pruning scout history")
     schedule.every(1).hours.do(db.prune_value_history).tag("pruning value history")
+
+    email_notifier = EmailNotifier(db, config, EmailConfig(), logger)
+    schedule.every(1).minutes.do(email_notifier.check_and_send).tag("email digest")
     try:
         while True:
             schedule.run_pending()

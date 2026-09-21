@@ -53,6 +53,8 @@ class AutoTrader:
             self.db.set_current_coin(pair.to_coin, result.price)
             self.update_trade_threshold(pair.to_coin, result.price)
             self.db.log_ratchet(pair.to_coin, self.manager.get_currency_balance(pair.to_coin.symbol, True))
+            # A successful jump means the bot is no longer parked in the bridge.
+            self.db.set_parked_in_bridge(False)
             return result
 
         self.logger.info("Couldn't buy, going back to scouting mode...")
@@ -287,8 +289,16 @@ class AutoTrader:
 
     def bridge_scout(self):
         """
-        If we have any bridge coin leftover, buy a coin with it that we won't immediately trade out of
+        If we have any bridge coin leftover, buy a coin with it that we won't immediately trade out of.
+
+        Skipped when the bot is intentionally parked in the bridge after a
+        take-profit: the cash should sit idle until a ratio-triggered jump
+        provides the re-entry signal, not be immediately reinvested.
         """
+        if self.db.get_parked_in_bridge():
+            self.logger.info("Parked in bridge after take-profit; skipping bridge_scout until a ratio signal fires")
+            return None
+
         bridge_balance = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
 
         for coin in self.db.get_coins():
@@ -369,8 +379,14 @@ class AutoTrader:
             # Otherwise the next scout can buy straight back in, and the stop
             # achieved nothing but a round trip in fees.
             self.db.start_cooldown(symbol, self.config.STOP_COOLDOWN)
-
-        self.logger.info(f"{symbol} closed to {bridge}; scouting will choose the next position")
+        elif reason == "take-profit":
+            # Park in the bridge so bridge_scout does not immediately reinvest
+            # the proceeds. The bot waits for the next ratio-triggered jump
+            # signal before re-entering a coin.
+            self.db.set_parked_in_bridge(True)
+            self.logger.info(
+                f"{symbol} take-profit closed to {bridge}; parked in {bridge} until a ratio signal fires"
+            )
 
     def _portfolio(self):
         """Everything held right now, valued in the bridge currency."""

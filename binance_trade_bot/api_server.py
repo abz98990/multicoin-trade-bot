@@ -822,12 +822,94 @@ def scout_settings():
     return jsonify({"margin_override": margin})
 
 
+@app.route("/api/parked_in_bridge", methods=["GET", "POST"])
+def parked_in_bridge():
+    """
+    GET  — returns {"parked": true|false} indicating whether the bot is
+           sitting in the bridge currency after a take-profit exit.
+    POST — clears the park flag so the bot resumes normal scouting.
+           Body is ignored; the only action is to un-park.
+    """
+    if request.method == "GET":
+        return jsonify({"parked": db.get_parked_in_bridge()})
+
+    if is_cross_origin():
+        return jsonify({"error": "Park flag can only be cleared from the dashboard itself."}), 403
+
+    db.set_parked_in_bridge(False)
+    db.log_event("risk", "Bridge park cleared from dashboard; bot will resume scouting")
+    return jsonify({"parked": False})
+
+
+
+@app.route("/api/email/settings", methods=["GET", "POST"])
+def email_settings():
+    """
+    GET  — returns current email digest configuration:
+           {enabled, interval_hours, host, port, recipient}
+           (password is never returned)
+    POST — updates the live interval. Body: {"interval_hours": 1 | 6 | 0}
+           0 pauses sending without touching user.cfg.
+    """
+    from .email_config import EmailConfig  # local import — EmailConfig reads user.cfg on demand
+    email_cfg = EmailConfig()
+
+    if request.method == "GET":
+        return jsonify(
+            {
+                **email_cfg.info(),                       # enabled, host, port, username, recipient, interval_hours
+                "interval_hours": db.get_email_interval_hours(),  # DB override wins over user.cfg
+            }
+        )
+
+    if is_cross_origin():
+        return jsonify({"error": "Email settings can only be changed from the dashboard itself."}), 403
+
+    payload = request.get_json(silent=True) or {}
+    raw = payload.get("interval_hours")
+    if raw is None:
+        return jsonify({"error": "interval_hours is required."}), 400
+    try:
+        hours = float(raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "interval_hours must be a number."}), 400
+    if hours < 0:
+        return jsonify({"error": "interval_hours must be >= 0 (0 = paused)."}), 400
+
+    db.set_email_interval_hours(hours)
+    db.log_event(
+        "risk",
+        f"Email digest interval set to {hours:g}h" if hours else "Email digest paused",
+    )
+    return jsonify({"interval_hours": hours})
+
+
+@app.route("/api/email/test", methods=["POST"])
+def email_test():
+    """
+    Force-send a digest email right now and return the result.
+    Useful for verifying SMTP credentials without waiting for the interval.
+    """
+    if is_cross_origin():
+        return jsonify({"error": "Test emails can only be sent from the dashboard itself."}), 403
+
+    from .email_config import EmailConfig
+    from .email_notifier import EmailNotifier
+
+    notifier = EmailNotifier(db, config, EmailConfig(), logger)
+    error = notifier.send_now()
+    if error:
+        return jsonify({"ok": False, "error": error}), 500
+    return jsonify({"ok": True})
+
+
 @app.route("/api/pairs")
 def pairs():
     session: Session
     with db.db_session() as session:
         all_pairs: List[Pair] = session.query(Pair).all()
         return jsonify([pair.info() for pair in all_pairs])
+
 
 
 @socketio.on("update", namespace="/backend")

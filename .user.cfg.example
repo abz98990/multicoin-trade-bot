@@ -58,3 +58,6 @@ take_profit=0
 # Minutes to keep a coin out of consideration after it stopped out, so the next
 # scout cannot buy straight back into it.
 stop_cooldown=60
+
+# Email digest settings are configured separately in email.cfg.
+# Copy email.cfg.example to email.cfg and fill in your SMTP credentials there.

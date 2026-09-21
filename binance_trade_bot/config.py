@@ -98,9 +98,6 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.STOP_LOSS = float(os.environ.get("STOP_LOSS") or config.get(USER_CFG_SECTION, "stop_loss"))
         self.TAKE_PROFIT = float(os.environ.get("TAKE_PROFIT") or config.get(USER_CFG_SECTION, "take_profit"))
 
-        # After stopping out, hold that coin out of consideration for a while.
-        # Without it the very next scout can buy straight back into the coin it
-        # just stopped out of, which makes the stop pointless.
         self.STOP_COOLDOWN = float(
             os.environ.get("STOP_COOLDOWN") or config.get(USER_CFG_SECTION, "stop_cooldown")
         )

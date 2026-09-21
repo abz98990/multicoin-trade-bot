@@ -126,6 +126,49 @@ class Database:
         )
         return self.get_coin(symbol).info()
 
+    def get_parked_in_bridge(self) -> bool:
+        """True when the bot has intentionally exited to the bridge after a take-profit."""
+        session: Session
+        with self.db_session() as session:
+            row = session.query(ScoutSettings).get(1)
+            return bool(row.parked_in_bridge) if row else False
+
+    def set_parked_in_bridge(self, value: bool):
+        """Park (True) or un-park (False) the bot from the bridge currency."""
+        session: Session
+        with self.db_session() as session:
+            row = session.query(ScoutSettings).get(1)
+            if row is None:
+                row = ScoutSettings()
+                session.add(row)
+            row.parked_in_bridge = value
+
+    def get_email_interval_hours(self) -> float:
+        """
+        The live email digest interval in hours.
+
+        Reads the DB value first. Falls back to 1.0 (the column default) if no
+        ScoutSettings row exists yet. EmailNotifier._seed_interval() writes the
+        real user.cfg value on first startup, so this fallback is only hit during
+        the brief window before the bot finishes initialising.
+        """
+        session: Session
+        with self.db_session() as session:
+            row = session.query(ScoutSettings).get(1)
+            if row is not None and row.email_interval_hours is not None:
+                return float(row.email_interval_hours)
+        return 1.0
+
+    def set_email_interval_hours(self, hours: float):
+        """Update the email digest interval live. 0 pauses sending."""
+        session: Session
+        with self.db_session() as session:
+            row = session.query(ScoutSettings).get(1)
+            if row is None:
+                row = ScoutSettings()
+                session.add(row)
+            row.email_interval_hours = hours
+
     def get_coin(self, coin: Union[Coin, str]) -> Coin:
         if isinstance(coin, Coin):
             return coin
@@ -426,6 +469,8 @@ class Database:
         ("current_coin_history", "take_profit", "FLOAT"),
         ("coins", "cooldown_until", "DATETIME"),
         ("coins", "scout_margin_override", "FLOAT"),
+        ("scout_settings", "parked_in_bridge", "BOOLEAN"),
+        ("scout_settings", "email_interval_hours", "FLOAT"),
     )
 
     def create_database(self):
