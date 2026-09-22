@@ -48,6 +48,20 @@ class AutoTrader:
             self.logger.info("Couldn't sell, going back to scouting mode...")
             return None
 
+        # If we had nothing to sell (the from_coin was already sold — e.g. by a
+        # take-profit close in check_risk_levels) AND the bot is intentionally
+        # parked in the bridge, do NOT use the bridge funds to buy.
+        #
+        # Without this guard, the scout loop would call _jump_to_best_coin with
+        # the just-sold coin (balance=0, can_sell=False) and immediately spend
+        # the TP proceeds on the best ratio target, defeating the park entirely.
+        if not can_sell and self.db.get_parked_in_bridge():
+            self.logger.info(
+                f"Skipping buy of {pair.to_coin} — parked in {self.config.BRIDGE.symbol} "
+                f"after take-profit; waiting for the next real ratio signal from a held coin"
+            )
+            return None
+
         result = self.manager.buy_alt(pair.to_coin, self.config.BRIDGE)
         if result is not None:
             self.db.set_current_coin(pair.to_coin, result.price)
@@ -59,6 +73,7 @@ class AutoTrader:
 
         self.logger.info("Couldn't buy, going back to scouting mode...")
         return None
+
 
     def update_trade_threshold(self, coin: Coin, coin_price: float):
         """
